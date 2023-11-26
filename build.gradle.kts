@@ -17,6 +17,8 @@ dependencies {
     implementation("org.ow2.asm:asm-util:9.4")
     implementation("org.ow2.asm:asm-tree:9.4")
     implementation("org.springframework:spring-web:6.1.1")
+    implementation("com.fasterxml.jackson.core:jackson-annotations:2.16.0")
+    implementation("org.json:json:20231013")
 }
 
 tasks.test {

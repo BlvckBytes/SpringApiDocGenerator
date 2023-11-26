@@ -1,12 +1,12 @@
 package me.blvckbytes.openapigenerator.endpoint
 
 import me.blvckbytes.openapigenerator.endpoint.type.input.EndpointInputType
-import me.blvckbytes.openapigenerator.endpoint.type.output.EndpointOutputType
+import me.blvckbytes.openapigenerator.endpoint.type.output.JavaClassEndpointOutputType
 import org.springframework.http.HttpStatus
 import org.springframework.web.bind.annotation.RequestMethod
 
 class EndpointMethod(
-  val returnType: EndpointOutputType?,
+  val returnType: JavaClassEndpointOutputType?,
   val parameterTypes: List<EndpointInputType>,
   val requestMethod: RequestMethod,
   val absoluteRequestPath: String,
