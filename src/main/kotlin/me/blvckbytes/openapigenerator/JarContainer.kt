@@ -40,4 +40,36 @@ class JarContainer(
 
     return locateClassByPath(descriptor.substring(1, descriptorLength - 1))
   }
+
+  fun findTypesThatExtendReturnType(returnType: JavaClassFile): List<JavaClassFile> {
+    val result = mutableListOf<JavaClassFile>()
+
+    for (returnTypeItem in returnTypeClassFileByPath.values) {
+      if (doesExtend(returnTypeItem, returnType))
+        result.add(returnTypeItem)
+    }
+
+    return result
+  }
+
+  private fun doesExtend(type: JavaClassFile, superClass: JavaClassFile): Boolean {
+    if (type == superClass)
+      return true
+
+    if (type.classNode.superName != null) {
+      val typeSuperClass = classFileByPath[type.classNode.superName]
+      if (typeSuperClass != null && doesExtend(typeSuperClass, superClass))
+        return true
+    }
+
+    if (type.classNode.interfaces != null) {
+      for (typeInterface in type.classNode.interfaces) {
+        val typeInterfaceClass = classFileByPath[typeInterface]
+        if (typeInterfaceClass != null && doesExtend(typeInterfaceClass, superClass))
+          return true
+      }
+    }
+
+    return false
+  }
 }
