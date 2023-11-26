@@ -5,13 +5,18 @@ import java.util.zip.ZipInputStream
 
 object JarReader {
 
-  fun readJar(jarPath: String): JarContainer {
+  fun readJar(
+    jarPath: String,
+    controllerPredicate: (classFilePath: String) -> Boolean,
+    returnTypePredicate: (classFilePath: String) -> Boolean
+  ): JarContainer {
     return JarContainer(
       File(jarPath).inputStream().use {
         val result = mutableMapOf<String, JavaClassFile>()
         collectClassFiles(ZipInputStream(it), result)
         result
-      }
+      },
+      controllerPredicate, returnTypePredicate
     )
   }
 

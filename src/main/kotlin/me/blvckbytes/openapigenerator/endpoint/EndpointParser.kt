@@ -202,11 +202,10 @@ object EndpointParser {
     }
   }
 
-  fun parseEndpoints(jar: JarContainer, controllerPackages: List<String>): List<EndpointMethod> {
+  fun parseEndpoints(jar: JarContainer): List<EndpointMethod> {
     val endpoints = mutableListOf<EndpointMethod>()
 
-    for (controllerPackage in controllerPackages) {
-      val controllerPackagePath = controllerPackage.replace('.', '/')
+    for (controllerPackagePath in jar.controllerPackagePaths) {
       for (entry in jar.classes) {
         if (!entry.key.startsWith(controllerPackagePath))
           continue

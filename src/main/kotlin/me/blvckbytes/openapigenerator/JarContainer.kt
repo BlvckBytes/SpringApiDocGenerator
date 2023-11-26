@@ -1,8 +1,29 @@
 package me.blvckbytes.openapigenerator
 
 class JarContainer(
-  private val classFileByPath: Map<String, JavaClassFile>
+  private val classFileByPath: Map<String, JavaClassFile>,
+  controllerPredicate: (classFilePath: String) -> Boolean,
+  returnTypePredicate: (classFilePath: String) -> Boolean,
 ) {
+
+  private val returnTypeClassFileByPath: Map<String, JavaClassFile>
+
+  val controllerPackagePaths: List<String>
+  private val returnTypePackagePaths: List<String>
+
+  init {
+    controllerPackagePaths = classFileByPath.keys.filter(controllerPredicate).toList()
+    returnTypePackagePaths = classFileByPath.keys.filter(returnTypePredicate).toList()
+
+    returnTypeClassFileByPath = classFileByPath.filter {
+      for (returnTypePackage in returnTypePackagePaths) {
+        if (it.key.startsWith(returnTypePackage))
+          return@filter true
+      }
+      false
+    }
+  }
+
   val classes: Collection<Map.Entry<String, JavaClassFile>>
   get() = classFileByPath.entries
 
