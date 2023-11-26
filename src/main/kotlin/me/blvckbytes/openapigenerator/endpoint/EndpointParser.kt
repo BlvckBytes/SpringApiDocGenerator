@@ -71,9 +71,11 @@ object EndpointParser {
     if (annotationNodes != null) {
       for (argumentAnnotation in annotationNodes) {
         when (argumentAnnotation.desc) {
+          // TODO: Also parse annotation name/value string
           'L' + PathVariable::class.qualifiedName!!.replace('.', '/') + ';' -> {
             return InputSource.PATH
           }
+          // TODO: Also parse name/value string
           'L' + RequestParam::class.qualifiedName!!.replace('.', '/') + ';' -> {
             return InputSource.PARAMETER
           }
@@ -145,8 +147,30 @@ object EndpointParser {
       )
 
     val argumentTypes = mutableListOf<EndpointInputType>()
-    val argumentNames = (methodNode.localVariables ?: emptyList()).map { it.name }
     val argumentAnnotationLists = methodNode.visibleParameterAnnotations ?: emptyArray()
+
+    val argumentNames: List<String>?
+
+    if (methodNode.localVariables == null)
+      argumentNames = null
+    else {
+      var collectedArgumentNames: MutableList<String>? = null
+
+      // TODO: GOSH, this is a hack! methodNode.parameters would always yield null...
+      //       It looks like everything after this are the parameters, if it works, it works, :^)
+      for (localVariable in methodNode.localVariables) {
+        val localVariableName = localVariable.name
+
+        if (localVariableName == "this") {
+          collectedArgumentNames = mutableListOf()
+          continue
+        }
+
+        collectedArgumentNames?.add(localVariableName)
+      }
+
+      argumentNames = collectedArgumentNames
+    }
 
     for (argumentTypeIndex in methodType.argumentTypes.indices) {
       val argumentType = methodType.argumentTypes[argumentTypeIndex]
@@ -155,8 +179,7 @@ object EndpointParser {
       val argumentAnnotations = argumentAnnotationLists.getOrNull(argumentTypeIndex)
       val inputSource = resolveInputSource(argumentAnnotations)
 
-      // [0] = this
-      val argumentName = argumentNames.getOrNull(argumentTypeIndex + 1)
+      val argumentName = argumentNames?.getOrNull(argumentTypeIndex)
         ?: throw IllegalStateException("Could not resolve argument name for index $argumentTypeIndex")
 
       argumentTypes.add(

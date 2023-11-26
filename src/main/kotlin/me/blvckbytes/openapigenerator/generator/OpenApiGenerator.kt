@@ -6,31 +6,221 @@ import me.blvckbytes.openapigenerator.JavaClassFile
 import me.blvckbytes.openapigenerator.Util
 import me.blvckbytes.openapigenerator.endpoint.EndpointMethod
 import me.blvckbytes.openapigenerator.endpoint.type.BuiltInType
-import org.json.JSONArray
-import org.json.JSONObject
+import me.blvckbytes.openapigenerator.endpoint.type.input.BuiltInEndpointInputType
+import me.blvckbytes.openapigenerator.endpoint.type.input.InputSource
+import me.blvckbytes.openapigenerator.endpoint.type.input.JavaClassEndpointInputType
+import org.codehaus.jettison.json.JSONArray
+import org.codehaus.jettison.json.JSONObject
 import org.objectweb.asm.Opcodes
-import org.springframework.web.bind.annotation.RequestMethod
+import java.net.URLEncoder
 
 object OpenApiGenerator {
 
   private val jsonIgnoreDescriptor = Util.makeDescriptor(JsonIgnore::class)
 
-  fun generate(jar: JarContainer, endpoints: List<EndpointMethod>) {
-    val schemaBlocks = mutableListOf<JSONObject>()
+  fun generate(jar: JarContainer, endpoints: List<EndpointMethod>): String {
+    val rootNode = JSONObject()
+    rootNode.put("openapi", "3.0.1")
+
+    val infoNode = JSONObject()
+    rootNode.put("info", infoNode)
+    infoNode.put("title", "OpenAPI Definition")
+    infoNode.put("version", "v0")
+
+    val serversNode = JSONArray()
+    val serverNode = JSONObject()
+    serversNode.put(serverNode)
+    rootNode.put("servers", serversNode)
+    serverNode.put("url", "http://localhost:8000")
+    serverNode.put("description", "Local development server")
+
+    val pathsNode = JSONObject()
+    rootNode.put("paths", pathsNode)
+
+    val componentsNode = JSONObject()
+    val schemasNode = JSONObject()
+    componentsNode.put("schemas", schemasNode)
+    rootNode.put("components", componentsNode)
+
+    val endpointNodeByAbsolutePath = mutableMapOf<String, JSONObject>()
     val createdSchemasByName = mutableMapOf<String, JavaClassFile>()
 
     for (endpoint in endpoints) {
-//      if (endpoint.requestMethod != RequestMethod.GET || endpoint.absoluteRequestPath != "/icon")
-      if (endpoint.requestMethod != RequestMethod.GET || endpoint.absoluteRequestPath != "/base-tag")
-        continue
+      val path = endpoint.absoluteRequestPath
+      val pathNode = endpointNodeByAbsolutePath.computeIfAbsent(path) {
+        val node = JSONObject()
+        pathsNode.put(endpoint.absoluteRequestPath, node)
+        node
+      }
+
+      val methodNode = JSONObject()
+      pathNode.put(endpoint.requestMethod.name.lowercase(), methodNode)
+
+      val tagsNode = JSONArray()
+      val nextPathSlashIndex = path.indexOf('/', 1)
+
+      tagsNode.put(
+        if (nextPathSlashIndex < 0)
+          path.substring(1)
+        else
+          path.substring(1, nextPathSlashIndex)
+      )
+
+      methodNode.put("tags", tagsNode)
+
+      val parametersNode = JSONArray()
+      methodNode.put("parameters", parametersNode)
+
+      for (parameterType in endpoint.parameterTypes) {
+        when (parameterType.inputSource) {
+          InputSource.PATH,
+          InputSource.PARAMETER -> {
+            val parameterNode = JSONObject()
+            parametersNode.put(parameterNode)
+
+            parameterNode.put("name", parameterType.name)
+
+            val parameterSchemaNode = JSONObject()
+            parameterNode.put("schema", parameterSchemaNode)
+
+            if (parameterType.inputSource == InputSource.PATH) {
+              parameterNode.put("in", "path")
+              parameterNode.put("required", true)
+
+              if (parameterType !is BuiltInEndpointInputType)
+                throw IllegalStateException("Non-builtins are not supported in source PATH")
+
+              appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
+              continue
+            }
+
+            // PARAMETER
+
+            parameterNode.put("in", "query")
+            // TODO: Field(s) required flag
+
+            when (parameterType) {
+              is BuiltInEndpointInputType -> {
+                if (parameterType.type == BuiltInType.TYPE_MULTIPART_FILE) {
+                  /*
+                    requestBody:
+                      content:
+                        multipart/form-data:
+                          schema:
+                            type: object
+                            properties:
+                              ...
+                   */
+                  // TODO: Create a body entry, remember that it's form-data and
+                  //       always append if this type is found. Also, what happens to other parameters
+                  //       which have no annotation? Do they automatically need to go in here?
+                  continue
+                }
+
+                appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
+              }
+              is JavaClassEndpointInputType -> {
+                val schemaName = generateSchema(parameterType.javaClass, null, jar, schemasNode, createdSchemasByName)
+                parameterSchemaNode.put("\$ref", makeRefValue(schemaName))
+              }
+              else -> throw IllegalStateException("Unimplemented parameter type $parameterType")
+            }
+          }
+
+          InputSource.BODY -> {
+            if (methodNode.has("requestBody"))
+              throw IllegalStateException("A single endpoint cannot have multiple request bodies")
+
+            val requestBodyNode = JSONObject()
+            methodNode.put("requestBody", requestBodyNode)
+
+            val contentNode = JSONObject()
+            requestBodyNode.put("content", contentNode)
+
+            val contentTypeNode = JSONObject()
+            contentNode.put("application/json", contentTypeNode)
+
+            val schemaNode = JSONObject()
+            contentTypeNode.put("schema", schemaNode)
+
+            if (parameterType !is JavaClassEndpointInputType)
+              throw IllegalStateException("Non-java-class are not supported in source BODY")
+
+            val schemaName = generateSchema(parameterType.javaClass, null, jar, schemasNode, createdSchemasByName)
+            schemaNode.put("\$ref", makeRefValue(schemaName))
+          }
+        }
+      }
+
+      val responsesNode = JSONObject()
+      methodNode.put("responses", responsesNode)
+
+      val responseNode = JSONObject()
+      responsesNode.put(endpoint.successResponseCode.value().toString(), responseNode)
+
+      responseNode.put("description", endpoint.successResponseCode.name)
 
       val returnType = endpoint.returnType ?: continue
 
-      generateSchema(returnType.javaClass, returnType.generics, jar, schemaBlocks, createdSchemasByName)
-      break
+      val responseContentNode = JSONObject()
+      responseNode.put("content", responseContentNode)
+
+      val responseContentContentTypeNode = JSONObject()
+      responseContentNode.put("application/json", responseContentContentTypeNode)
+
+      val responseContentSchemaNode = JSONObject()
+      responseContentContentTypeNode.put("schema", responseContentSchemaNode)
+
+      val schemaName = generateSchema(returnType.javaClass, returnType.generics, jar, schemasNode, createdSchemasByName)
+      responseContentSchemaNode.put("\$ref", makeRefValue(schemaName))
     }
 
-    schemaBlocks.forEach { println(it.toString(2)) }
+    // TODO: This is a stupid hack, but I have no idea why this library insists of escaping /
+    return rootNode.toString(2).replace("\\/", "/")
+  }
+
+  private fun makeRefValue(schemaName: String): String {
+    val encodedRefValue = URLEncoder.encode(schemaName, Charsets.UTF_8)
+    return "#/components/schemas/$encodedRefValue"
+  }
+
+  private fun appendTypeAndFormatForBuiltIn(type: BuiltInType, node: JSONObject) {
+    when (type) {
+      BuiltInType.TYPE_UUID -> {
+        node.put("type", "string")
+        node.put("format", "uuid")
+      }
+      BuiltInType.TYPE_LOCAL_DATE_TIME -> {
+        node.put("type", "string")
+        node.put("format", "date-time")
+      }
+      BuiltInType.TYPE_STRING,
+      BuiltInType.TYPE_CHAR -> {
+        node.put("type", "string")
+      }
+      BuiltInType.TYPE_BYTE,
+      BuiltInType.TYPE_INTEGER,
+      BuiltInType.TYPE_SHORT -> {
+        node.put("type", "integer")
+        node.put("format", "int32")
+      }
+      BuiltInType.TYPE_LONG -> {
+        node.put("type", "integer")
+        node.put("format", "int64")
+      }
+      BuiltInType.TYPE_FLOAT -> {
+        node.put("type", "number")
+        node.put("format", "float")
+      }
+      BuiltInType.TYPE_DOUBLE -> {
+        node.put("type", "number")
+        node.put("format", "double")
+      }
+      BuiltInType.TYPE_BOOLEAN -> {
+        node.put("type", "boolean")
+      }
+      else -> throw IllegalStateException("Type and format not implemented for $type")
+    }
   }
 
   private fun parseGenericPlaceholders(javaClass: JavaClassFile): List<String>? {
@@ -62,12 +252,12 @@ object OpenApiGenerator {
     javaClass: JavaClassFile,
     genericTypes: Array<JavaClassFile>?,
     jar: JarContainer,
-    schemaBlocks: MutableList<JSONObject>,
+    schemasNode: JSONObject,
     createdSchemasByName: MutableMap<String, JavaClassFile>
   ): String {
     val schemaName = (
       if (genericTypes != null)
-        "${javaClass.simpleName}<" + genericTypes.joinToString(separator = ",") { it.simpleName } + ">"
+        "${javaClass.simpleName}__" + genericTypes.joinToString(separator = "_") { it.simpleName }
       else
         javaClass.simpleName
     )
@@ -81,9 +271,7 @@ object OpenApiGenerator {
       throw IllegalStateException("Schema name $schemaName was already taken by ${existingSchemaWithThisName.classNode.name}")
     }
 
-    val rootNode = JSONObject()
     val schemaNode = JSONObject()
-
     val classNode = javaClass.classNode
 
     if (classNode.access and Opcodes.ACC_ENUM != 0) {
@@ -105,7 +293,8 @@ object OpenApiGenerator {
 
       jar.findTypesThatExtendReturnType(javaClass).forEach {
         val possibleSchema = JSONObject()
-        possibleSchema.put("\$ref", generateSchema(it, null, jar, schemaBlocks, createdSchemasByName))
+        val generatedSchemaName = generateSchema(it, null, jar, schemasNode, createdSchemasByName)
+        possibleSchema.put("\$ref", makeRefValue(generatedSchemaName))
         possibleSchemasArray.put(possibleSchema)
       }
 
@@ -131,95 +320,89 @@ object OpenApiGenerator {
 
         val property = JSONObject()
 
-        when (val builtInType = BuiltInType.getByDescriptor(field.desc)) {
-          BuiltInType.TYPE_UUID -> {
-            property.put("type", "string")
-            property.put("format", "uuid")
-          }
-          BuiltInType.TYPE_LOCAL_DATE_TIME -> {
-            property.put("type", "string")
-            property.put("format", "date-time")
-          }
-          BuiltInType.TYPE_STRING,
-          BuiltInType.TYPE_CHAR -> {
-            property.put("type", "string")
-          }
-          BuiltInType.TYPE_BYTE,
-          BuiltInType.TYPE_INTEGER,
-          BuiltInType.TYPE_SHORT -> {
-            property.put("type", "integer")
-            property.put("format", "int32")
-          }
-          BuiltInType.TYPE_LONG -> {
-            property.put("type", "integer")
-            property.put("format", "int64")
-          }
-          BuiltInType.TYPE_FLOAT -> {
-            property.put("type", "number")
-            property.put("format", "float")
-          }
-          BuiltInType.TYPE_DOUBLE -> {
-            property.put("type", "number")
-            property.put("format", "double")
-          }
-          BuiltInType.TYPE_BOOLEAN -> {
-            property.put("type", "boolean")
-          }
-          null -> {
-            if (!field.desc.startsWith('L'))
-              throw IllegalStateException("Don't know how to map ${field.desc} (${field.name})")
+        val builtInType = BuiltInType.getByDescriptor(field.desc)
 
-            if (
-              field.desc == "Ljava/util/List;" ||
-              field.desc == "Ljava/util/Collection;" ||
-              field.desc == "Ljava/util/Set;"
-            ) {
-              property.put("type", "array")
+        if (builtInType != null) {
+          appendTypeAndFormatForBuiltIn(builtInType, property)
+        }
+
+        else {
+          if (
+            field.desc == "Ljava/util/List;" ||
+            field.desc == "Ljava/util/Collection;" ||
+            field.desc == "Ljava/util/Set;"
+          ) {
+            property.put("type", "array")
+
+            val refObject = JSONObject()
+
+            val genericPlaceholderDescriptor = field.signature.substring(
+              field.signature.indexOf('<') + 1,
+              field.signature.indexOf('>'),
+            )
+
+            val genericPlaceholders = parseGenericPlaceholders(javaClass)
+            val genericType: JavaClassFile
+
+            if (genericPlaceholderDescriptor.startsWith("T")) {
+              if (genericPlaceholders == null)
+                throw IllegalStateException("Need generic placeholders for schema ${javaClass.classNode.name}")
+
+              if (genericTypes == null)
+                throw IllegalStateException("Need generic types")
+
+              // T...;
+              val genericPlaceholderPath =
+                genericPlaceholderDescriptor.substring(1, genericPlaceholderDescriptor.length - 1)
+              val genericPlaceholderIndex = genericPlaceholders.indexOf(genericPlaceholderPath)
+
+              if (genericPlaceholderIndex < 0)
+                throw IllegalStateException("Could not decide generic placeholder index of $genericPlaceholderDescriptor")
+
+              genericType = genericTypes.getOrNull(genericPlaceholderIndex)
+                ?: throw IllegalStateException("No match for generic placeholder index $genericPlaceholderIndex")
+            } else
+              genericType = jar.locateClassByDescriptor(genericPlaceholderDescriptor)
+
+            val generatedSchemaName = generateSchema(genericType, null, jar, schemasNode, createdSchemasByName)
+            refObject.put("\$ref", makeRefValue(generatedSchemaName))
+
+            property.put("type", "array")
+            property.put("items", refObject)
+          }
+
+          // Array type
+          else if (field.desc.startsWith('[')) {
+
+            property.put("type", "array")
+
+            val builtInArrayType = BuiltInType.getByDescriptor(field.desc.substring(1))
+            if (builtInArrayType != null) {
+              val arrayItemsNode = JSONObject()
+              appendTypeAndFormatForBuiltIn(builtInArrayType, arrayItemsNode)
+              property.put("items", arrayItemsNode)
+            }
+
+            else {
+              val arrayType = jar.locateClassByDescriptor(field.desc.substring(1))
 
               val refObject = JSONObject()
-
-              val genericPlaceholderDescriptor = field.signature.substring(
-                field.signature.indexOf('<') + 1,
-                field.signature.indexOf('>'),
-              )
-
-              val genericPlaceholders = parseGenericPlaceholders(javaClass)
-              val genericType: JavaClassFile
-
-              if (genericPlaceholderDescriptor.startsWith("T")) {
-                if (genericPlaceholders == null)
-                  throw IllegalStateException("Need generic placeholders for schema ${javaClass.classNode.name}")
-
-                if (genericTypes == null)
-                  throw IllegalStateException("Need generic types")
-
-                // T...;
-                val genericPlaceholderPath =
-                  genericPlaceholderDescriptor.substring(1, genericPlaceholderDescriptor.length - 1)
-                val genericPlaceholderIndex = genericPlaceholders.indexOf(genericPlaceholderPath)
-
-                if (genericPlaceholderIndex < 0)
-                  throw IllegalStateException("Could not decide generic placeholder index of $genericPlaceholderDescriptor")
-
-                genericType = genericTypes.getOrNull(genericPlaceholderIndex)
-                  ?: throw IllegalStateException("No match for generic placeholder index $genericPlaceholderIndex")
-              } else
-                genericType = jar.locateClassByDescriptor(genericPlaceholderDescriptor)
-
-              generateSchema(genericType, null, jar, schemaBlocks, createdSchemasByName)
-
-              refObject.put("\$ref", "#components/schemas/${genericType.simpleName}")
+              val generatedSchemaName = generateSchema(arrayType, null, jar, schemasNode, createdSchemasByName)
+              refObject.put("\$ref", makeRefValue(generatedSchemaName))
 
               property.put("type", "array")
               property.put("items", refObject)
-            } else {
-              val subClass = jar.locateClassByDescriptor(field.desc)
-              generateSchema(subClass, null, jar, schemaBlocks, createdSchemasByName)
-              property.put("\$ref", "#/components/schemas/${subClass.simpleName}")
             }
           }
 
-          else -> throw IllegalStateException("Unimplemented type: $builtInType")
+          else {
+            if (!field.desc.startsWith('L'))
+              throw IllegalStateException("Don't know how to map ${field.desc} (${field.name})")
+
+            val subClass = jar.locateClassByDescriptor(field.desc)
+            generateSchema(subClass, null, jar, schemasNode, createdSchemasByName)
+            property.put("\$ref", makeRefValue(subClass.simpleName))
+          }
         }
 
         // TODO: Figure out nullability and add that flag
@@ -229,8 +412,7 @@ object OpenApiGenerator {
       schemaNode.put("properties", propertyMap)
     }
 
-    rootNode.put(schemaName, schemaNode)
-    schemaBlocks.add(rootNode)
+    schemasNode.put(schemaName, schemaNode)
     return schemaName
   }
 }

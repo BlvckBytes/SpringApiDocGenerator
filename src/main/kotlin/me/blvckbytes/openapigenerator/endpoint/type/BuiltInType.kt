@@ -22,9 +22,9 @@ class BuiltInType private constructor(
     val TYPE_DOUBLE          = BuiltInType("DOUBLE",          "D", "Ljava/lang/Double;")
     val TYPE_FLOAT           = BuiltInType("FLOAT",           "F", "Ljava/lang/Float;")
     val TYPE_BYTE            = BuiltInType("BYTE",            "B", "Ljava/lang/Byte;")
-    val TYPE_CHAR            = BuiltInType("CHAR",            "C", "LJava/lang/Character;")
-    val TYPE_SHORT           = BuiltInType("SHORT",           "S", "LJava/lang/Short;")
-    val TYPE_BOOLEAN         = BuiltInType("BOOLEAN",         "Z", "LJava/lang/Boolean;")
+    val TYPE_CHAR            = BuiltInType("CHAR",            "C", "Ljava/lang/Character;")
+    val TYPE_SHORT           = BuiltInType("SHORT",           "S", "Ljava/lang/Short;")
+    val TYPE_BOOLEAN         = BuiltInType("BOOLEAN",         "Z", "Ljava/lang/Boolean;")
 
     fun getByDescriptor(descriptor: String): BuiltInType? {
       return constantByDescriptor[descriptor]
