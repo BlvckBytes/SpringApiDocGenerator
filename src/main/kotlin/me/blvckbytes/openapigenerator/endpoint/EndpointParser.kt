@@ -32,26 +32,13 @@ object EndpointParser {
   private val responseStatusDescriptor = Util.makeDescriptor(ResponseStatus::class)
   private val httpStatusDescriptor = Util.makeDescriptor(HttpStatus::class)
 
-  private fun <T> extractAnnotationValue(
-    values: Map<String, Any>,
-    mapper: (value: Any) -> T,
-    vararg nameAndFallbackNames: String,
-  ): T? {
-    for (targetName in nameAndFallbackNames) {
-      val targetValue = values[targetName] ?: continue
-      return mapper(targetValue)
-    }
-
-    return null
-  }
-
   private fun parseMappingAnnotationPath(mappingAnnotation: AnnotationNode): String {
-    return parseAnnotationValues(mappingAnnotation)?.let {
-      extractAnnotationValue(it, { annotationValue ->
+    return Util.parseAnnotationValues(mappingAnnotation)?.let {
+      Util.extractAnnotationValue(it, { annotationValue ->
         (annotationValue as ArrayList<*>).fold("") { accumulator, value ->
           joinPaths(accumulator, value as String)
         }
-      }, "value", "path")
+      }, RequestMapping::value.name, RequestMapping::path.name)
     } ?: ""
   }
 
@@ -70,14 +57,18 @@ object EndpointParser {
   private fun resolveInputSource(annotationNodes: List<AnnotationNode>?): Pair<InputSource, String?> {
     if (annotationNodes != null) {
       for (argumentAnnotation in annotationNodes) {
-        val argumentAnnotationValues = parseAnnotationValues(argumentAnnotation)
+        val argumentAnnotationValues = Util.parseAnnotationValues(argumentAnnotation)
 
         when (argumentAnnotation.desc) {
           'L' + PathVariable::class.qualifiedName!!.replace('.', '/') + ';' -> {
             return Pair(
               InputSource.PATH,
               argumentAnnotationValues?.let {
-                extractAnnotationValue(it, { annotationValue -> annotationValue as String }, "name", "value")
+                Util.extractAnnotationValue(
+                  it,
+                  { annotationValue -> annotationValue as String },
+                  PathVariable::name.name, PathVariable::value.name
+                )
               }
             )
           }
@@ -85,7 +76,11 @@ object EndpointParser {
             return Pair(
               InputSource.PARAMETER,
               argumentAnnotationValues?.let {
-                extractAnnotationValue(it, { annotationValue -> annotationValue as String }, "name", "value")
+                Util.extractAnnotationValue(
+                  it,
+                  { annotationValue -> annotationValue as String },
+                  RequestParam::name.name, RequestParam::value.name
+                )
               }
             )
           }
@@ -110,7 +105,7 @@ object EndpointParser {
         if (annotation.desc != responseStatusDescriptor)
           continue
 
-        val annotationValues = parseAnnotationValues(annotation) ?: continue
+        val annotationValues = Util.parseAnnotationValues(annotation) ?: continue
         val codeValue = annotationValues["code"] ?: annotationValues["value"]
 
         if (codeValue != null && codeValue is Array<*> && codeValue.size >= 2) {
@@ -266,22 +261,6 @@ object EndpointParser {
 
     if (result.endsWith('/'))
       return result.substring(0, result.length - 1)
-
-    return result
-  }
-
-  private fun parseAnnotationValues(annotation: AnnotationNode): Map<String, Any>? {
-    if (annotation.values == null)
-      return null
-
-    val result = mutableMapOf<String, Any>()
-
-    for (i in annotation.values.indices step 2) {
-      val valueName = annotation.values[i]
-      val valueValue = annotation.values[i + 1]
-
-      result[valueName as String] = valueValue
-    }
 
     return result
   }

@@ -1,9 +1,7 @@
 package me.blvckbytes.openapigenerator.generator
 
 import com.fasterxml.jackson.annotation.JsonIgnore
-import me.blvckbytes.openapigenerator.JarContainer
-import me.blvckbytes.openapigenerator.JavaClassFile
-import me.blvckbytes.openapigenerator.Util
+import me.blvckbytes.openapigenerator.*
 import me.blvckbytes.openapigenerator.endpoint.EndpointMethod
 import me.blvckbytes.openapigenerator.endpoint.type.BuiltInType
 import me.blvckbytes.openapigenerator.endpoint.type.input.BuiltInEndpointInputType
@@ -12,11 +10,15 @@ import me.blvckbytes.openapigenerator.endpoint.type.input.JavaClassEndpointInput
 import org.codehaus.jettison.json.JSONArray
 import org.codehaus.jettison.json.JSONObject
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
+import org.objectweb.asm.tree.LdcInsnNode
+import org.objectweb.asm.tree.MethodInsnNode
 import java.net.URLEncoder
 
 object OpenApiGenerator {
 
   private val jsonIgnoreDescriptor = Util.makeDescriptor(JsonIgnore::class)
+  private val polymorphicDiscriminatorDescriptor = Util.makeDescriptor(PolymorphicDiscriminator::class)
 
   fun generate(jar: JarContainer, endpoints: List<EndpointMethod>): String {
     val rootNode = JSONObject()
@@ -289,9 +291,112 @@ object OpenApiGenerator {
 
     else if (classNode.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT) != 0) {
       val possibleSchemasArray = JSONArray()
-      // TODO: discriminator/propertyName
+      val extendingClasses = jar.findTypesThatExtendReturnType(javaClass)
 
-      jar.findTypesThatExtendReturnType(javaClass).forEach {
+      val discriminatorFieldName = classNode.visibleAnnotations?.find {
+        it.desc == polymorphicDiscriminatorDescriptor
+      }?.let { annotation ->
+        Util.parseAnnotationValues(annotation )?.let {
+          Util.extractAnnotationValue(
+            it,
+            { annotationValue -> annotationValue as String},
+            PolymorphicDiscriminator::fieldName.name
+          )
+        }
+      }
+
+      if (discriminatorFieldName != null) {
+        val discriminatorNode = JSONObject()
+        discriminatorNode.put("propertyName", discriminatorFieldName)
+
+        var discriminatorFieldType: JavaClassFile? = null
+
+        for (extendingClass in extendingClasses) {
+          if (extendingClass == javaClass)
+            continue
+
+          val discriminatorField = extendingClass.classNode.fields.find { it.name == discriminatorFieldName }
+            ?: throw IllegalStateException("Class $extendingClass does not have the discriminator field $discriminatorFieldName")
+
+          val type = jar.locateClassByDescriptor(discriminatorField.desc)
+
+          if (discriminatorFieldType == null) {
+            discriminatorFieldType = type
+            continue
+          }
+
+          if (discriminatorFieldType != type)
+            throw IllegalStateException("Class $extendingClass} deviates from discriminator type $discriminatorFieldType")
+        }
+
+        if (discriminatorFieldType == null)
+          throw IllegalStateException("Seems like there are no implementations of $javaClass available, could not determine discriminator type")
+
+        val mappingNode = JSONObject()
+        discriminatorNode.put("mapping", mappingNode)
+
+        val enumInstanceFields = discriminatorFieldType.classNode.fields.filter {
+          it.access and (Opcodes.ACC_STATIC or Opcodes.ACC_ENUM) == 0
+        }
+
+        val typeFieldIndex = enumInstanceFields.indexOfFirst { it.name == "type" }
+
+        if (typeFieldIndex < 0)
+          throw IllegalStateException("$discriminatorFieldType needs to have a field named type")
+
+        if (enumInstanceFields[typeFieldIndex].desc != "Ljava/lang/Class;")
+          throw IllegalStateException("$discriminatorFieldType's type field needs to be of type java.lang.Class")
+
+        val classInitMethod = discriminatorFieldType.classNode.methods.find { it.name == "<clinit>" }
+          ?: throw IllegalStateException("Could not find <clinit> of $discriminatorFieldType")
+
+        val mappedToTypeDescriptors = mutableListOf<String>()
+        var ldcOccurrenceCounter = 0
+
+        for (instruction in classInitMethod.instructions) {
+          // new call of a enum constant
+          if (instruction is MethodInsnNode && instruction.name == "<init>") {
+            ldcOccurrenceCounter = 0
+            continue
+          }
+
+          // First ldc is the constant name
+          // Then, I >guess<, all enum fields are loaded
+          if (instruction is LdcInsnNode) {
+            if (ldcOccurrenceCounter == typeFieldIndex + 1) {
+              val constant = instruction.cst
+
+              if (constant !is Type)
+                throw IllegalStateException("Expected a Type to be loaded")
+
+              mappedToTypeDescriptors.add(constant.toString())
+            }
+
+            ++ldcOccurrenceCounter
+          }
+        }
+
+        val enumConstantFields = discriminatorFieldType.classNode.fields.filter {
+          it.access and Opcodes.ACC_ENUM != 0
+        }
+
+        if (enumConstantFields.size != mappedToTypeDescriptors.size)
+          throw IllegalStateException("Didn't find as many enum constant fields as mapped to type descriptors")
+
+        for (enumConstantIndex in enumConstantFields.indices) {
+          val enumConstantField = enumConstantFields[enumConstantIndex]
+          val mappedToType = jar.locateClassByDescriptor(mappedToTypeDescriptors[enumConstantIndex])
+          val mappedToTypeSchemaName = generateSchema(mappedToType, null, jar, schemasNode, createdSchemasByName)
+          mappingNode.put(enumConstantField.name, makeRefValue(mappedToTypeSchemaName))
+        }
+
+        schemaNode.put("discriminator", discriminatorNode)
+      }
+
+      extendingClasses.forEach {
+        if (it == javaClass)
+          return@forEach
+
         val possibleSchema = JSONObject()
         val generatedSchemaName = generateSchema(it, null, jar, schemasNode, createdSchemasByName)
         possibleSchema.put("\$ref", makeRefValue(generatedSchemaName))
