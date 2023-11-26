@@ -351,7 +351,6 @@ object OpenApiGenerator {
               if (genericTypes == null)
                 throw IllegalStateException("Need generic types")
 
-              // T...;
               val genericPlaceholderPath =
                 genericPlaceholderDescriptor.substring(1, genericPlaceholderDescriptor.length - 1)
               val genericPlaceholderIndex = genericPlaceholders.indexOf(genericPlaceholderPath)

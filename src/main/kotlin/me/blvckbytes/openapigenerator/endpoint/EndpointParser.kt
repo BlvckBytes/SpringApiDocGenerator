@@ -32,27 +32,27 @@ object EndpointParser {
   private val responseStatusDescriptor = Util.makeDescriptor(ResponseStatus::class)
   private val httpStatusDescriptor = Util.makeDescriptor(HttpStatus::class)
 
-  private fun parseMappingAnnotationPath(mappingAnnotation: AnnotationNode): String {
-    val annotationValues = parseAnnotationValues(mappingAnnotation)
-
-    if (annotationValues != null) {
-      for (annotationValueEntry in annotationValues) {
-        val annotationValueName = annotationValueEntry.key
-        if (annotationValueName == "value" || annotationValueName == "path") {
-          val path = when (val annotationValue = annotationValueEntry.value) {
-            is ArrayList<*> -> annotationValue.fold("") { accumulator, value -> joinPaths(accumulator, value as String) }
-            else -> throw IllegalStateException("Unexpected value type for $annotationValueName: ${annotationValue.javaClass}")
-          }
-
-          if (path.isBlank())
-            continue
-
-          return path
-        }
-      }
+  private fun <T> extractAnnotationValue(
+    values: Map<String, Any>,
+    mapper: (value: Any) -> T,
+    vararg nameAndFallbackNames: String,
+  ): T? {
+    for (targetName in nameAndFallbackNames) {
+      val targetValue = values[targetName] ?: continue
+      return mapper(targetValue)
     }
 
-    return ""
+    return null
+  }
+
+  private fun parseMappingAnnotationPath(mappingAnnotation: AnnotationNode): String {
+    return parseAnnotationValues(mappingAnnotation)?.let {
+      extractAnnotationValue(it, { annotationValue ->
+        (annotationValue as ArrayList<*>).fold("") { accumulator, value ->
+          joinPaths(accumulator, value as String)
+        }
+      }, "value", "path")
+    } ?: ""
   }
 
   private fun parseRequestMethodAndPath(methodNode: MethodNode): Pair<String, RequestMethod>? {
@@ -67,20 +67,30 @@ object EndpointParser {
     return null
   }
 
-  private fun resolveInputSource(annotationNodes: List<AnnotationNode>?): InputSource {
+  private fun resolveInputSource(annotationNodes: List<AnnotationNode>?): Pair<InputSource, String?> {
     if (annotationNodes != null) {
       for (argumentAnnotation in annotationNodes) {
+        val argumentAnnotationValues = parseAnnotationValues(argumentAnnotation)
+
         when (argumentAnnotation.desc) {
-          // TODO: Also parse annotation name/value string
           'L' + PathVariable::class.qualifiedName!!.replace('.', '/') + ';' -> {
-            return InputSource.PATH
+            return Pair(
+              InputSource.PATH,
+              argumentAnnotationValues?.let {
+                extractAnnotationValue(it, { annotationValue -> annotationValue as String }, "name", "value")
+              }
+            )
           }
-          // TODO: Also parse name/value string
           'L' + RequestParam::class.qualifiedName!!.replace('.', '/') + ';' -> {
-            return InputSource.PARAMETER
+            return Pair(
+              InputSource.PARAMETER,
+              argumentAnnotationValues?.let {
+                extractAnnotationValue(it, { annotationValue -> annotationValue as String }, "name", "value")
+              }
+            )
           }
           'L' + RequestBody::class.qualifiedName!!.replace('.', '/') + ';' -> {
-            return InputSource.BODY
+            return Pair(InputSource.BODY, null)
           }
           "Ljakarta/validation/Valid;" -> {
             // noop for now
@@ -91,7 +101,7 @@ object EndpointParser {
     }
 
     // I *think* that this is the default, if not specified otherwise by an annotation
-    return InputSource.PARAMETER
+    return Pair(InputSource.PARAMETER, null)
   }
 
   private fun parseSuccessResponseCode(methodNode: MethodNode): HttpStatus {
@@ -177,10 +187,11 @@ object EndpointParser {
       val builtInArgumentType = BuiltInType.getByDescriptor(argumentType.descriptor)
 
       val argumentAnnotations = argumentAnnotationLists.getOrNull(argumentTypeIndex)
-      val inputSource = resolveInputSource(argumentAnnotations)
+      val (inputSource, customArgumentName) = resolveInputSource(argumentAnnotations)
 
-      val argumentName = argumentNames?.getOrNull(argumentTypeIndex)
-        ?: throw IllegalStateException("Could not resolve argument name for index $argumentTypeIndex")
+      val argumentName = customArgumentName
+        ?: (argumentNames?.getOrNull(argumentTypeIndex)
+        ?: throw IllegalStateException("Could not resolve argument name for index $argumentTypeIndex"))
 
       argumentTypes.add(
         if (builtInArgumentType != null)
