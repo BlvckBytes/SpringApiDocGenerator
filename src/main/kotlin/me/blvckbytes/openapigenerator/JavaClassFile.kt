@@ -12,9 +12,12 @@ class JavaClassFile(
   // Most classes will not be analyzed any further, thus parsing should be lazy
   val classNode: ClassNode
   get() {
-    val reader = ClassReader(bytes)
+    if (_classNode != null)
+      return _classNode!!
+
     _classNode = ClassNode()
-    reader.accept(_classNode, 0)
+    ClassReader(bytes).accept(_classNode, 0)
+
     return _classNode!!
   }
 
