@@ -33,39 +33,47 @@ class JarContainer(
   }
 
   fun locateClassByDescriptor(descriptor: String): JavaClassFile {
+    return tryLocateClassByDescriptor(descriptor)
+      ?: throw IllegalStateException("Could not locate class by descriptor $descriptor")
+  }
+
+  fun tryLocateClassByDescriptor(descriptor: String): JavaClassFile? {
     val descriptorLength = descriptor.length
 
     if (!(descriptor.startsWith('L') && descriptor[descriptorLength - 1] == ';'))
-      throw IllegalStateException("Invalid class descriptor: $descriptor")
+      return null
 
-    return locateClassByPath(descriptor.substring(1, descriptorLength - 1))
+    return classFileByPath[descriptor.substring(1, descriptorLength - 1)]
   }
 
   fun findTypesThatExtendReturnType(returnType: JavaClassFile): List<JavaClassFile> {
     val result = mutableListOf<JavaClassFile>()
 
     for (returnTypeItem in returnTypeClassFileByPath.values) {
-      if (doesExtend(returnTypeItem, returnType))
+      if (returnTypeItem == returnType)
+        continue
+
+      if (doesExtend(returnTypeItem, returnType.classNode.name))
         result.add(returnTypeItem)
     }
 
     return result
   }
 
-  private fun doesExtend(type: JavaClassFile, superClass: JavaClassFile): Boolean {
-    if (type == superClass)
+  fun doesExtend(type: JavaClassFile, superName: String): Boolean {
+    if (type.classNode.name == superName)
       return true
 
     if (type.classNode.superName != null) {
       val typeSuperClass = classFileByPath[type.classNode.superName]
-      if (typeSuperClass != null && doesExtend(typeSuperClass, superClass))
+      if (typeSuperClass != null && doesExtend(typeSuperClass, superName))
         return true
     }
 
     if (type.classNode.interfaces != null) {
       for (typeInterface in type.classNode.interfaces) {
         val typeInterfaceClass = classFileByPath[typeInterface]
-        if (typeInterfaceClass != null && doesExtend(typeInterfaceClass, superClass))
+        if (typeInterfaceClass != null && doesExtend(typeInterfaceClass, superName))
           return true
       }
     }

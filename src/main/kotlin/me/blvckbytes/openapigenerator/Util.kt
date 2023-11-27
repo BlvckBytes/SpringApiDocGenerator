@@ -6,7 +6,11 @@ import kotlin.reflect.KClass
 object Util {
 
   fun makeDescriptor(type: KClass<*>): String {
-    return 'L' + type.qualifiedName!!.replace('.', '/') + ';'
+    return 'L' + makeName(type) + ';'
+  }
+
+  fun makeName(type: KClass<*>): String {
+    return type.qualifiedName!!.replace('.', '/')
   }
 
   fun <T> extractAnnotationValue(
