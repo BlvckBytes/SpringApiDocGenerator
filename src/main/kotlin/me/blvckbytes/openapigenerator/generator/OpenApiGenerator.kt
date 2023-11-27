@@ -189,6 +189,19 @@ object OpenApiGenerator {
     return "#/components/schemas/$encodedRefValue"
   }
 
+  private fun appendTypeAndEnumConstantsForEnum(javaClass: JavaClassFile, schemaNode: JSONObject) {
+    schemaNode.put("type", "string")
+
+    val enumValueArray = JSONArray()
+
+    for (enumField in javaClass.classNode.fields) {
+      if (enumField.access and Opcodes.ACC_ENUM != 0)
+        enumValueArray.put(enumField.name)
+    }
+
+    schemaNode.put("enum", enumValueArray)
+  }
+
   private fun appendTypeAndFormatForBuiltIn(type: BuiltInType, node: JSONObject) {
     when (type) {
       BuiltInType.TYPE_UUID -> {
@@ -377,6 +390,138 @@ object OpenApiGenerator {
       mappingNode.put(discriminatorEntry.key, makeRefValue(discriminatorEntry.value))
   }
 
+  private fun createAndAppendTypedArray(
+    jar: JarContainer,
+    createdSchemasByName: MutableMap<String, JavaClassFile>,
+    schemasNode: JSONObject,
+    property: JSONObject,
+    field: FieldNode
+  ) {
+    property.put("type", "array")
+
+    val builtInArrayType = BuiltInType.getByDescriptor(field.desc.substring(1))
+
+    if (builtInArrayType != null) {
+      val arrayItemsNode = JSONObject()
+      appendTypeAndFormatForBuiltIn(builtInArrayType, arrayItemsNode)
+      property.put("items", arrayItemsNode)
+      return
+    }
+
+    val arrayType = jar.locateClassByDescriptor(field.desc.substring(1))
+
+    val refObject = JSONObject()
+    val generatedSchemaName = generateSchema(arrayType, null, jar, schemasNode, createdSchemasByName)
+    refObject.put("\$ref", makeRefValue(generatedSchemaName))
+
+    property.put("type", "array")
+    property.put("items", refObject)
+  }
+
+  private fun createAndAppendGenericArray(
+    javaClass: JavaClassFile,
+    genericTypes: Array<JavaClassFile>?,
+    jar: JarContainer,
+    createdSchemasByName: MutableMap<String, JavaClassFile>,
+    schemasNode: JSONObject,
+    property: JSONObject,
+    field: FieldNode
+  ) {
+    property.put("type", "array")
+
+    val refObject = JSONObject()
+
+    val genericPlaceholderDescriptor = field.signature.substring(
+      field.signature.indexOf('<') + 1,
+      field.signature.indexOf('>'),
+    )
+
+    val genericPlaceholders = parseGenericPlaceholders(javaClass)
+    val genericType: JavaClassFile
+
+    if (genericPlaceholderDescriptor.startsWith("T")) {
+      if (genericPlaceholders == null)
+        throw IllegalStateException("Need generic placeholders for schema ${javaClass.classNode.name}")
+
+      if (genericTypes == null)
+        throw IllegalStateException("Need generic types")
+
+      val genericPlaceholderPath =
+        genericPlaceholderDescriptor.substring(1, genericPlaceholderDescriptor.length - 1)
+      val genericPlaceholderIndex = genericPlaceholders.indexOf(genericPlaceholderPath)
+
+      if (genericPlaceholderIndex < 0)
+        throw IllegalStateException("Could not decide generic placeholder index of $genericPlaceholderDescriptor")
+
+      genericType = genericTypes.getOrNull(genericPlaceholderIndex)
+        ?: throw IllegalStateException("No match for generic placeholder index $genericPlaceholderIndex")
+    } else
+      genericType = jar.locateClassByDescriptor(genericPlaceholderDescriptor)
+
+    val generatedSchemaName = generateSchema(genericType, null, jar, schemasNode, createdSchemasByName)
+    refObject.put("\$ref", makeRefValue(generatedSchemaName))
+
+    property.put("type", "array")
+    property.put("items", refObject)
+  }
+
+  private fun createAndAppendObjectProperties(
+    javaClass: JavaClassFile,
+    genericTypes: Array<JavaClassFile>?,
+    jar: JarContainer,
+    createdSchemasByName: MutableMap<String, JavaClassFile>,
+    schemasNode: JSONObject,
+    schemaNode: JSONObject,
+  ) {
+    schemaNode.put("type", "object")
+
+    val propertyMap = JSONObject()
+
+    fieldIterator@ for (field in javaClass.classNode.fields) {
+      if (field.visibleAnnotations?.any { it.desc == jsonIgnoreDescriptor } == true)
+        continue@fieldIterator
+
+      if (field.access and Opcodes.ACC_STATIC != 0)
+        continue
+
+      val property = JSONObject()
+
+      val builtInType = BuiltInType.getByDescriptor(field.desc)
+
+      if (builtInType != null)
+        appendTypeAndFormatForBuiltIn(builtInType, property)
+
+      else {
+        if (field.desc == "Ljava/util/List;" || field.desc == "Ljava/util/Collection;" || field.desc == "Ljava/util/Set;")
+          createAndAppendGenericArray(javaClass, genericTypes, jar, createdSchemasByName, schemasNode, property, field)
+
+        else if (field.desc.startsWith('['))
+          createAndAppendTypedArray(jar, createdSchemasByName, schemasNode, property, field)
+
+        else {
+          property.put("\$ref", makeRefValue(generateSchema(
+            jar.locateClassByDescriptor(field.desc), null,
+            jar, schemasNode, createdSchemasByName
+          )))
+        }
+      }
+
+      // TODO: Figure out nullability and add that flag
+      propertyMap.put(field.name, property)
+    }
+
+    schemaNode.put("properties", propertyMap)
+  }
+
+  private fun makeSchemaName(
+    javaClass: JavaClassFile,
+    genericTypes: Array<JavaClassFile>?,
+  ): String {
+    if (genericTypes == null)
+      return javaClass.simpleName
+    return "${javaClass.simpleName}__" + genericTypes.joinToString(separator = "_") { it.simpleName }
+  }
+
   private fun generateSchema(
     javaClass: JavaClassFile,
     genericTypes: Array<JavaClassFile>?,
@@ -384,13 +529,7 @@ object OpenApiGenerator {
     schemasNode: JSONObject,
     createdSchemasByName: MutableMap<String, JavaClassFile>
   ): String {
-    val schemaName = (
-      if (genericTypes != null)
-        "${javaClass.simpleName}__" + genericTypes.joinToString(separator = "_") { it.simpleName }
-      else
-        javaClass.simpleName
-    )
-
+    val schemaName = makeSchemaName(javaClass, genericTypes)
     val existingSchemaWithThisName = createdSchemasByName.put(schemaName, javaClass)
 
     if ((existingSchemaWithThisName) != null) {
@@ -401,22 +540,11 @@ object OpenApiGenerator {
     }
 
     val schemaNode = JSONObject()
-    val classNode = javaClass.classNode
 
-    if (classNode.access and Opcodes.ACC_ENUM != 0) {
-      schemaNode.put("type", "string")
+    if (javaClass.classNode.access and Opcodes.ACC_ENUM != 0)
+      appendTypeAndEnumConstantsForEnum(javaClass, schemaNode)
 
-      val enumValueArray = JSONArray()
-
-      for (enumField in classNode.fields) {
-        if (enumField.access and Opcodes.ACC_ENUM != 0)
-          enumValueArray.put(enumField.name)
-      }
-
-      schemaNode.put("enum", enumValueArray)
-    }
-
-    else if (classNode.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT) != 0) {
+    else if (javaClass.classNode.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT) != 0) {
       val extendingClasses = jar.findTypesThatExtendReturnType(javaClass)
 
       if (extendingClasses.isEmpty())
@@ -426,115 +554,8 @@ object OpenApiGenerator {
       createAndAppendDiscriminatorNode(extendingClasses, schemaNode, jar, schemasNode, createdSchemasByName)
     }
 
-    else {
-
-      schemaNode.put("type", "object")
-
-      val propertyMap = JSONObject()
-
-      fieldIterator@ for (field in classNode.fields) {
-        if (field.visibleAnnotations != null) {
-          for (fieldAnnotation in field.visibleAnnotations) {
-            if (fieldAnnotation.desc == jsonIgnoreDescriptor)
-              continue@fieldIterator
-          }
-        }
-
-        if (field.access and Opcodes.ACC_STATIC != 0)
-          continue
-
-        val property = JSONObject()
-
-        val builtInType = BuiltInType.getByDescriptor(field.desc)
-
-        if (builtInType != null) {
-          appendTypeAndFormatForBuiltIn(builtInType, property)
-        }
-
-        else {
-          if (
-            field.desc == "Ljava/util/List;" ||
-            field.desc == "Ljava/util/Collection;" ||
-            field.desc == "Ljava/util/Set;"
-          ) {
-            property.put("type", "array")
-
-            val refObject = JSONObject()
-
-            val genericPlaceholderDescriptor = field.signature.substring(
-              field.signature.indexOf('<') + 1,
-              field.signature.indexOf('>'),
-            )
-
-            val genericPlaceholders = parseGenericPlaceholders(javaClass)
-            val genericType: JavaClassFile
-
-            if (genericPlaceholderDescriptor.startsWith("T")) {
-              if (genericPlaceholders == null)
-                throw IllegalStateException("Need generic placeholders for schema ${javaClass.classNode.name}")
-
-              if (genericTypes == null)
-                throw IllegalStateException("Need generic types")
-
-              val genericPlaceholderPath =
-                genericPlaceholderDescriptor.substring(1, genericPlaceholderDescriptor.length - 1)
-              val genericPlaceholderIndex = genericPlaceholders.indexOf(genericPlaceholderPath)
-
-              if (genericPlaceholderIndex < 0)
-                throw IllegalStateException("Could not decide generic placeholder index of $genericPlaceholderDescriptor")
-
-              genericType = genericTypes.getOrNull(genericPlaceholderIndex)
-                ?: throw IllegalStateException("No match for generic placeholder index $genericPlaceholderIndex")
-            } else
-              genericType = jar.locateClassByDescriptor(genericPlaceholderDescriptor)
-
-            val generatedSchemaName = generateSchema(genericType, null, jar, schemasNode, createdSchemasByName)
-            refObject.put("\$ref", makeRefValue(generatedSchemaName))
-
-            property.put("type", "array")
-            property.put("items", refObject)
-          }
-
-          // Array type
-          else if (field.desc.startsWith('[')) {
-
-            property.put("type", "array")
-
-            val builtInArrayType = BuiltInType.getByDescriptor(field.desc.substring(1))
-            if (builtInArrayType != null) {
-              val arrayItemsNode = JSONObject()
-              appendTypeAndFormatForBuiltIn(builtInArrayType, arrayItemsNode)
-              property.put("items", arrayItemsNode)
-            }
-
-            else {
-              val arrayType = jar.locateClassByDescriptor(field.desc.substring(1))
-
-              val refObject = JSONObject()
-              val generatedSchemaName = generateSchema(arrayType, null, jar, schemasNode, createdSchemasByName)
-              refObject.put("\$ref", makeRefValue(generatedSchemaName))
-
-              property.put("type", "array")
-              property.put("items", refObject)
-            }
-          }
-
-          else {
-            if (!field.desc.startsWith('L'))
-              throw IllegalStateException("Don't know how to map ${field.desc} (${field.name})")
-
-            val subClass = jar.locateClassByDescriptor(field.desc)
-            generateSchema(subClass, null, jar, schemasNode, createdSchemasByName)
-            property.put("\$ref", makeRefValue(subClass.simpleName))
-          }
-        }
-
-        // TODO: Figure out nullability and add that flag
-        propertyMap.put(field.name, property)
-      }
-
-      schemaNode.put("properties", propertyMap)
-    }
+    else
+      createAndAppendObjectProperties(javaClass, genericTypes, jar, createdSchemasByName, schemasNode, schemaNode)
 
     schemasNode.put(schemaName, schemaNode)
     return schemaName
