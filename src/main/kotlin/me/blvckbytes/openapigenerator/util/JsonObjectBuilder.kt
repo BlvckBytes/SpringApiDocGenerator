@@ -2,7 +2,19 @@ package me.blvckbytes.openapigenerator.util
 
 import org.codehaus.jettison.json.JSONObject
 
-class JsonObjectBuilder(jsonObject: JSONObject? = null) {
+class JsonObjectBuilder private constructor(jsonObject: JSONObject? = null) {
+
+  companion object {
+    fun from(jsonObject: JSONObject?, handler: JsonObjectBuilder.() -> Unit): JsonObjectBuilder {
+      val builder = JsonObjectBuilder(jsonObject)
+      handler(builder)
+      return builder
+    }
+
+    fun empty(handler: JsonObjectBuilder.() -> Unit): JsonObjectBuilder {
+      return from(null, handler)
+    }
+  }
 
   private val jsonObject: JSONObject
 
@@ -35,13 +47,13 @@ class JsonObjectBuilder(jsonObject: JSONObject? = null) {
     return this
   }
 
-  fun addArray(key: String, valueBuilder: JsonArrayBuilder.() -> JsonArrayBuilder): JsonObjectBuilder {
-    jsonObject.put(key, valueBuilder(JsonArrayBuilder()).build())
+  fun addArray(key: String, valueBuilder: JsonArrayBuilder.() -> Unit): JsonObjectBuilder {
+    jsonObject.put(key, JsonArrayBuilder.empty(valueBuilder).build())
     return this
   }
 
-  fun addObject(key: String, valueBuilder: JsonObjectBuilder.() -> JsonObjectBuilder): JsonObjectBuilder {
-    jsonObject.put(key, valueBuilder(JsonObjectBuilder()).build())
+  fun addObject(key: String, valueBuilder: JsonObjectBuilder.() -> Unit): JsonObjectBuilder {
+    jsonObject.put(key, empty(valueBuilder).build())
     return this
   }
 

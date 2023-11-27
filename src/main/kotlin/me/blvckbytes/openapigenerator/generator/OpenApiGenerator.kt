@@ -26,18 +26,19 @@ object OpenApiGenerator {
   fun generate(jar: JarContainer, endpoints: List<EndpointMethod>): String {
     val rootNode = JSONObject()
 
-    JsonObjectBuilder(rootNode)
-      .addString("openapi", "3.0.1")
-      .addObject("info") {
+    JsonObjectBuilder.from(rootNode) {
+      addString("openapi", "3.0.1")
+      addObject("info") {
         addString("title", "OpenAPI Definition")
         addString("version", "v0")
       }
-      .addArray("servers") {
+      addArray("servers") {
         addObject() {
           addString("url", "http://localhost:8000")
           addString("description", "Local development server")
         }
       }
+    }
 
     val pathsNode = JSONObject()
     rootNode.put("paths", pathsNode)
@@ -51,137 +52,146 @@ object OpenApiGenerator {
     val createdSchemasByName = mutableMapOf<String, JavaClassFile>()
 
     for (endpoint in endpoints) {
-      val path = endpoint.absoluteRequestPath
-      val pathNode = endpointNodeByAbsolutePath.computeIfAbsent(path) {
+      val pathNode = endpointNodeByAbsolutePath.computeIfAbsent(endpoint.absoluteRequestPath) {
         val node = JSONObject()
         pathsNode.put(endpoint.absoluteRequestPath, node)
         node
       }
 
-      val methodNode = JSONObject()
-      pathNode.put(endpoint.requestMethod.name.lowercase(), methodNode)
-
-      val tagsNode = JSONArray()
-      val nextPathSlashIndex = path.indexOf('/', 1)
-
-      tagsNode.put(
-        if (nextPathSlashIndex < 0)
-          path.substring(1)
-        else
-          path.substring(1, nextPathSlashIndex)
-      )
-
-      methodNode.put("tags", tagsNode)
-
-      val parametersNode = JSONArray()
-      methodNode.put("parameters", parametersNode)
-
-      for (parameterType in endpoint.parameterTypes) {
-        when (parameterType.inputSource) {
-          InputSource.PATH,
-          InputSource.PARAMETER -> {
-            val parameterNode = JSONObject()
-            parametersNode.put(parameterNode)
-
-            parameterNode.put("name", parameterType.name)
-
-            val parameterSchemaNode = JSONObject()
-            parameterNode.put("schema", parameterSchemaNode)
-
-            if (parameterType.inputSource == InputSource.PATH) {
-              parameterNode.put("in", "path")
-              parameterNode.put("required", true)
-
-              if (parameterType !is BuiltInEndpointInputType)
-                throw IllegalStateException("Non-builtins are not supported in source PATH")
-
-              appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
-              continue
-            }
-
-            // PARAMETER
-
-            parameterNode.put("in", "query")
-            // TODO: Field(s) required flag
-
-            when (parameterType) {
-              is BuiltInEndpointInputType -> {
-                if (parameterType.type == BuiltInType.TYPE_MULTIPART_FILE) {
-                  /*
-                    requestBody:
-                      content:
-                        multipart/form-data:
-                          schema:
-                            type: object
-                            properties:
-                              ...
-                   */
-                  // TODO: Create a body entry, remember that it's form-data and
-                  //       always append if this type is found. Also, what happens to other parameters
-                  //       which have no annotation? Do they automatically need to go in here?
-                  continue
-                }
-
-                appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
-              }
-              is JavaClassEndpointInputType -> {
-                val schemaName = generateSchema(parameterType.javaClass, null, jar, schemasNode, createdSchemasByName)
-                parameterSchemaNode.put("\$ref", makeRefValue(schemaName))
-              }
-              else -> throw IllegalStateException("Unimplemented parameter type $parameterType")
-            }
-          }
-
-          InputSource.BODY -> {
-            if (methodNode.has("requestBody"))
-              throw IllegalStateException("A single endpoint cannot have multiple request bodies")
-
-            val requestBodyNode = JSONObject()
-            methodNode.put("requestBody", requestBodyNode)
-
-            val contentNode = JSONObject()
-            requestBodyNode.put("content", contentNode)
-
-            val contentTypeNode = JSONObject()
-            contentNode.put("application/json", contentTypeNode)
-
-            val schemaNode = JSONObject()
-            contentTypeNode.put("schema", schemaNode)
-
-            if (parameterType !is JavaClassEndpointInputType)
-              throw IllegalStateException("Non-java-class are not supported in source BODY")
-
-            val schemaName = generateSchema(parameterType.javaClass, null, jar, schemasNode, createdSchemasByName)
-            schemaNode.put("\$ref", makeRefValue(schemaName))
-          }
-        }
-      }
-
-      val responsesNode = JSONObject()
-      methodNode.put("responses", responsesNode)
-
-      val responseNode = JSONObject()
-      responsesNode.put(endpoint.successResponseCode.value().toString(), responseNode)
-
-      responseNode.put("description", endpoint.successResponseCode.name)
-
-      val returnType = endpoint.returnType ?: continue
-
-      val responseContentNode = JSONObject()
-      responseNode.put("content", responseContentNode)
-
-      val responseContentContentTypeNode = JSONObject()
-      responseContentNode.put("application/json", responseContentContentTypeNode)
-
-      val responseContentSchemaNode = JSONObject()
-      responseContentContentTypeNode.put("schema", responseContentSchemaNode)
-
-      val schemaName = generateSchema(returnType.javaClass, returnType.generics, jar, schemasNode, createdSchemasByName)
-      responseContentSchemaNode.put("\$ref", makeRefValue(schemaName))
+      appendEndpointToPathNode(endpoint, pathNode, createdSchemasByName, jar, schemasNode)
     }
 
     // TODO: This is a stupid hack, but I have no idea why this library insists of escaping /
     return rootNode.toString(2).replace("\\/", "/")
+  }
+
+  private fun appendEndpointToPathNode(
+    endpoint: EndpointMethod,
+    pathNode: JSONObject,
+    createdSchemasByName: MutableMap<String, JavaClassFile>,
+    jar: JarContainer,
+    schemasNode: JSONObject
+  ) {
+    val methodNode = JSONObject()
+    pathNode.put(endpoint.requestMethod.name.lowercase(), methodNode)
+
+    val tagsNode = JSONArray()
+    methodNode.put("tags", tagsNode)
+    tagsNode.put(makeTag(endpoint))
+
+    val parametersNode = JSONArray()
+    methodNode.put("parameters", parametersNode)
+
+    for (parameterType in endpoint.parameterTypes) {
+      when (parameterType.inputSource) {
+        InputSource.PATH,
+        InputSource.PARAMETER -> {
+          val parameterNode = JSONObject()
+          parametersNode.put(parameterNode)
+
+          parameterNode.put("name", parameterType.name)
+
+          val parameterSchemaNode = JSONObject()
+          parameterNode.put("schema", parameterSchemaNode)
+
+          if (parameterType.inputSource == InputSource.PATH) {
+            parameterNode.put("in", "path")
+            parameterNode.put("required", true)
+
+            if (parameterType !is BuiltInEndpointInputType)
+              throw IllegalStateException("Non-builtins are not supported in source PATH")
+
+            appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
+            continue
+          }
+
+          // PARAMETER
+
+          parameterNode.put("in", "query")
+          // TODO: Field(s) required flag
+
+          when (parameterType) {
+            is BuiltInEndpointInputType -> {
+              if (parameterType.type == BuiltInType.TYPE_MULTIPART_FILE) {
+                /*
+                  requestBody:
+                    content:
+                      multipart/form-data:
+                        schema:
+                          type: object
+                          properties:
+                            ...
+                 */
+                // TODO: Create a body entry, remember that it's form-data and
+                //       always append if this type is found. Also, what happens to other parameters
+                //       which have no annotation? Do they automatically need to go in here?
+                continue
+              }
+
+              appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
+            }
+            is JavaClassEndpointInputType -> {
+              val schemaName = generateSchema(parameterType.javaClass, null, jar, schemasNode, createdSchemasByName)
+              parameterSchemaNode.put("\$ref", makeRefValue(schemaName))
+            }
+            else -> throw IllegalStateException("Unimplemented parameter type $parameterType")
+          }
+        }
+
+        InputSource.BODY -> {
+          if (methodNode.has("requestBody"))
+            throw IllegalStateException("A single endpoint cannot have multiple request bodies")
+
+          val requestBodyNode = JSONObject()
+          methodNode.put("requestBody", requestBodyNode)
+
+          val contentNode = JSONObject()
+          requestBodyNode.put("content", contentNode)
+
+          val contentTypeNode = JSONObject()
+          contentNode.put("application/json", contentTypeNode)
+
+          val schemaNode = JSONObject()
+          contentTypeNode.put("schema", schemaNode)
+
+          if (parameterType !is JavaClassEndpointInputType)
+            throw IllegalStateException("Non-java-class are not supported in source BODY")
+
+          val schemaName = generateSchema(parameterType.javaClass, null, jar, schemasNode, createdSchemasByName)
+          schemaNode.put("\$ref", makeRefValue(schemaName))
+        }
+      }
+    }
+
+    val responsesNode = JSONObject()
+    methodNode.put("responses", responsesNode)
+
+    JsonObjectBuilder.from(responsesNode) {
+      addObject(endpoint.successResponseCode.value().toString()) {
+        addString("description", endpoint.successResponseCode.name)
+
+        endpoint.returnType?.let {
+          val returnTypeSchemaName = generateSchema(it.javaClass, it.generics, jar, schemasNode, createdSchemasByName)
+
+          addObject("content") {
+            addObject("application/json") {
+              addObject("schema") {
+                addString("\$ref", makeRefValue(returnTypeSchemaName))
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private fun makeTag(endpoint: EndpointMethod): String {
+    val nextPathSlashIndex = endpoint.absoluteRequestPath.indexOf('/', 1)
+
+    if (nextPathSlashIndex < 0)
+      return endpoint.absoluteRequestPath.substring(1)
+
+    return endpoint.absoluteRequestPath.substring(1, nextPathSlashIndex)
   }
 
   private fun makeRefValue(schemaName: String): String {
