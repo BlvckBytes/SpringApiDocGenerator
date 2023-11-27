@@ -1,6 +1,6 @@
 package me.blvckbytes.openapigenerator.endpoint.type
 
-import me.blvckbytes.openapigenerator.Util
+import me.blvckbytes.openapigenerator.util.Util
 import org.springframework.web.multipart.MultipartFile
 import java.time.LocalDateTime
 import java.util.*

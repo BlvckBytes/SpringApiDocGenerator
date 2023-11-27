@@ -2,7 +2,7 @@ package me.blvckbytes.openapigenerator.endpoint
 
 import me.blvckbytes.openapigenerator.JarContainer
 import me.blvckbytes.openapigenerator.JavaClassFile
-import me.blvckbytes.openapigenerator.Util
+import me.blvckbytes.openapigenerator.util.Util
 import me.blvckbytes.openapigenerator.endpoint.type.BuiltInType
 import me.blvckbytes.openapigenerator.endpoint.type.input.BuiltInEndpointInputType
 import me.blvckbytes.openapigenerator.endpoint.type.input.EndpointInputType

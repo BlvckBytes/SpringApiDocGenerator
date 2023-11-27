@@ -7,6 +7,8 @@ import me.blvckbytes.openapigenerator.endpoint.type.BuiltInType
 import me.blvckbytes.openapigenerator.endpoint.type.input.BuiltInEndpointInputType
 import me.blvckbytes.openapigenerator.endpoint.type.input.InputSource
 import me.blvckbytes.openapigenerator.endpoint.type.input.JavaClassEndpointInputType
+import me.blvckbytes.openapigenerator.util.JsonObjectBuilder
+import me.blvckbytes.openapigenerator.util.Util
 import org.codehaus.jettison.json.JSONArray
 import org.codehaus.jettison.json.JSONObject
 import org.objectweb.asm.Opcodes
@@ -23,19 +25,19 @@ object OpenApiGenerator {
 
   fun generate(jar: JarContainer, endpoints: List<EndpointMethod>): String {
     val rootNode = JSONObject()
-    rootNode.put("openapi", "3.0.1")
 
-    val infoNode = JSONObject()
-    rootNode.put("info", infoNode)
-    infoNode.put("title", "OpenAPI Definition")
-    infoNode.put("version", "v0")
-
-    val serversNode = JSONArray()
-    val serverNode = JSONObject()
-    serversNode.put(serverNode)
-    rootNode.put("servers", serversNode)
-    serverNode.put("url", "http://localhost:8000")
-    serverNode.put("description", "Local development server")
+    JsonObjectBuilder(rootNode)
+      .addString("openapi", "3.0.1")
+      .addObject("info") {
+        addString("title", "OpenAPI Definition")
+        addString("version", "v0")
+      }
+      .addArray("servers") {
+        addObject() {
+          addString("url", "http://localhost:8000")
+          addString("description", "Local development server")
+        }
+      }
 
     val pathsNode = JSONObject()
     rootNode.put("paths", pathsNode)

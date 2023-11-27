@@ -1,4 +1,4 @@
-package me.blvckbytes.openapigenerator
+package me.blvckbytes.openapigenerator.util
 
 import org.objectweb.asm.tree.AnnotationNode
 import kotlin.reflect.KClass
