@@ -15,12 +15,12 @@ object Util {
 
   fun <T> extractAnnotationValue(
     values: Map<String, Any>,
-    mapper: (value: Any) -> T,
+    mapper: (value: Any) -> T?,
     vararg nameAndFallbackNames: String,
   ): T? {
     for (targetName in nameAndFallbackNames) {
       val targetValue = values[targetName] ?: continue
-      return mapper(targetValue)
+      return mapper(targetValue) ?: continue
     }
 
     return null

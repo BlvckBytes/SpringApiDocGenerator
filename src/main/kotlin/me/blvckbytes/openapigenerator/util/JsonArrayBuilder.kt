@@ -16,7 +16,7 @@ class JsonArrayBuilder private constructor(jsonArray: JSONArray? = null){
     }
   }
 
-  private val jsonArray: JSONArray
+  val jsonArray: JSONArray
 
   init {
     this.jsonArray = jsonArray ?: JSONArray()
@@ -48,16 +48,12 @@ class JsonArrayBuilder private constructor(jsonArray: JSONArray? = null){
   }
 
   fun addArray(valueBuilder: JsonArrayBuilder.() -> Unit): JsonArrayBuilder {
-    jsonArray.put(empty(valueBuilder).build())
+    jsonArray.put(empty(valueBuilder).jsonArray)
     return this
   }
 
   fun addObject(valueBuilder: JsonObjectBuilder.() -> Unit): JsonArrayBuilder {
-    jsonArray.put(JsonObjectBuilder.empty(valueBuilder).build())
+    jsonArray.put(JsonObjectBuilder.empty(valueBuilder).jsonObject)
     return this
-  }
-
-  fun build(): JSONArray {
-    return jsonArray
   }
 }

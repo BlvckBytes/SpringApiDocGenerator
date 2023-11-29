@@ -15,6 +15,7 @@ import org.objectweb.asm.tree.AnnotationNode
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.MethodNode
 import org.springframework.http.HttpStatus
+import org.springframework.http.MediaType
 import org.springframework.web.bind.annotation.*
 import kotlin.collections.ArrayList
 
@@ -30,28 +31,41 @@ object EndpointParser {
 
   private val requestMappingDescriptor = Util.makeDescriptor(RequestMapping::class)
   private val responseStatusDescriptor = Util.makeDescriptor(ResponseStatus::class)
+  private val requestBodyDescriptor = Util.makeDescriptor(RequestBody::class)
+  private val requestParamDescriptor = Util.makeDescriptor(RequestParam::class)
+  private val requestPartDescriptor = Util.makeDescriptor(RequestPart::class)
+  private val pathVariableDescriptor = Util.makeDescriptor(PathVariable::class)
   private val httpStatusDescriptor = Util.makeDescriptor(HttpStatus::class)
 
-  private fun parseMappingAnnotationPath(mappingAnnotation: AnnotationNode): String {
-    return Util.parseAnnotationValues(mappingAnnotation)?.let {
-      Util.extractAnnotationValue(it, { annotationValue ->
-        (annotationValue as ArrayList<*>).fold("") { accumulator, value ->
-          joinPaths(accumulator, value as String)
-        }
-      }, RequestMapping::value.name, RequestMapping::path.name)
-    } ?: ""
+  private fun parseMappingAnnotationPath(annotationValues: Map<String, Any>?): String {
+    return (
+      annotationValues?.let {
+        Util.extractAnnotationValue(it, { annotationValue ->
+          (annotationValue as ArrayList<*>).fold("") { accumulator, value ->
+            joinPaths(accumulator, value as String)
+          }
+        }, RequestMapping::value.name, RequestMapping::path.name)
+      }
+    ) ?: ""
   }
 
-  private fun parseRequestMethodAndPath(methodNode: MethodNode): Pair<String, RequestMethod>? {
-    if (methodNode.visibleAnnotations == null)
-      return null
+  private fun parseMappingAnnotationConsumes(annotationValues: Map<String, Any>?): String {
+    return (
+      annotationValues?.let {
+        Util.extractAnnotationValue(annotationValues, { annotationValue ->
+          if (annotationValue !is ArrayList<*>)
+            throw IllegalStateException("Expected a list of values")
 
-    for (methodAnnotation in methodNode.visibleAnnotations) {
-      val requestMethod = requestMethodBySpecificDescriptor[methodAnnotation.desc] ?: continue
-      return Pair(parseMappingAnnotationPath(methodAnnotation), requestMethod)
-    }
+          if (annotationValue.size > 1)
+            throw IllegalStateException("Currently not handling multiple request content types")
 
-    return null
+          if (annotationValue.size == 0)
+            return@extractAnnotationValue null
+
+          return@extractAnnotationValue annotationValue[0] as String
+        }, RequestMapping::consumes.name)
+      }
+    ) ?: MediaType.APPLICATION_JSON_VALUE
   }
 
   private fun resolveInputSource(annotationNodes: List<AnnotationNode>?): Pair<InputSource, String?> {
@@ -60,7 +74,7 @@ object EndpointParser {
         val argumentAnnotationValues = Util.parseAnnotationValues(argumentAnnotation)
 
         when (argumentAnnotation.desc) {
-          'L' + PathVariable::class.qualifiedName!!.replace('.', '/') + ';' -> {
+          pathVariableDescriptor -> {
             return Pair(
               InputSource.PATH,
               argumentAnnotationValues?.let {
@@ -72,7 +86,7 @@ object EndpointParser {
               }
             )
           }
-          'L' + RequestParam::class.qualifiedName!!.replace('.', '/') + ';' -> {
+          requestParamDescriptor -> {
             return Pair(
               InputSource.PARAMETER,
               argumentAnnotationValues?.let {
@@ -84,8 +98,20 @@ object EndpointParser {
               }
             )
           }
-          'L' + RequestBody::class.qualifiedName!!.replace('.', '/') + ';' -> {
+          requestBodyDescriptor -> {
             return Pair(InputSource.BODY, null)
+          }
+          requestPartDescriptor -> {
+            return Pair(
+              InputSource.BODY,
+              argumentAnnotationValues?.let {
+                Util.extractAnnotationValue(
+                  it,
+                  { annotationValue -> annotationValue as String },
+                  RequestPart::name.name, RequestPart::value.name
+                )
+              }
+            )
           }
           "Ljakarta/validation/Valid;" -> {
             // noop for now
@@ -137,8 +163,31 @@ object EndpointParser {
   }
 
   private fun parseEndpoint(basePath: String, methodNode: MethodNode, jar: JarContainer): EndpointMethod? {
-    val (requestPath, requestMethod) = parseRequestMethodAndPath(methodNode) ?: return null
-    val absoluteRequestPath = joinPaths(basePath, requestPath)
+    if (methodNode.visibleAnnotations == null)
+      return null
+
+    class MappingDetails(
+      val method: RequestMethod,
+      val path: String,
+      val contentType: String,
+    )
+
+    var mappingDetails: MappingDetails? = null
+
+    for (methodAnnotation in methodNode.visibleAnnotations) {
+      val annotationValues = Util.parseAnnotationValues(methodAnnotation)
+
+      mappingDetails = MappingDetails(
+        requestMethodBySpecificDescriptor[methodAnnotation.desc] ?: continue,
+        parseMappingAnnotationPath(annotationValues),
+        parseMappingAnnotationConsumes(annotationValues)
+      )
+    }
+
+    if (mappingDetails == null)
+      return null
+
+    val absoluteRequestPath = joinPaths(basePath, mappingDetails.path)
     val methodType = Type.getMethodType(methodNode.desc)
 
     val returnType = (
@@ -204,7 +253,8 @@ object EndpointParser {
     return EndpointMethod(
       returnType,
       argumentTypes,
-      requestMethod,
+      mappingDetails.method,
+      mappingDetails.contentType,
       absoluteRequestPath,
       parseSuccessResponseCode(methodNode)
     )
@@ -216,7 +266,8 @@ object EndpointParser {
     if (classNode.visibleAnnotations != null) {
       for (methodAnnotation in classNode.visibleAnnotations) {
         if (methodAnnotation.desc == requestMappingDescriptor) {
-          basePath = parseMappingAnnotationPath(methodAnnotation)
+          val annotationValues = Util.parseAnnotationValues(methodAnnotation) ?: continue
+          basePath = parseMappingAnnotationPath(annotationValues)
           break
         }
       }

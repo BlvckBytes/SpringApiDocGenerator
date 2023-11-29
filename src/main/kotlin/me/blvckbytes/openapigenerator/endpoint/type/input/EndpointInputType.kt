@@ -1,8 +1,6 @@
 package me.blvckbytes.openapigenerator.endpoint.type.input
 
-import me.blvckbytes.openapigenerator.endpoint.type.EndpointType
-
-interface EndpointInputType : EndpointType {
+interface EndpointInputType {
   val inputSource: InputSource
   val name: String
 }

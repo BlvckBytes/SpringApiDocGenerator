@@ -5,6 +5,21 @@ import org.codehaus.jettison.json.JSONObject
 class JsonObjectBuilder private constructor(jsonObject: JSONObject? = null) {
 
   companion object {
+    fun fromKeyOrCreate(jsonObject: JSONObject, key: String, handler: JsonObjectBuilder.() -> Unit): JsonObjectBuilder {
+      if (jsonObject.has(key)) {
+        val existingValue = jsonObject.get(key)
+
+        if (existingValue !is JSONObject)
+          throw IllegalStateException("Cannot extend the non-object $key of type ${existingValue.javaClass}")
+
+        return from(existingValue, handler)
+      }
+
+      return from(null, handler).also {
+        jsonObject.put(key, it.jsonObject)
+      }
+    }
+
     fun from(jsonObject: JSONObject?, handler: JsonObjectBuilder.() -> Unit): JsonObjectBuilder {
       val builder = JsonObjectBuilder(jsonObject)
       handler(builder)
@@ -16,7 +31,7 @@ class JsonObjectBuilder private constructor(jsonObject: JSONObject? = null) {
     }
   }
 
-  private val jsonObject: JSONObject
+  val jsonObject: JSONObject
 
   init {
     this.jsonObject = jsonObject ?: JSONObject()
@@ -48,16 +63,22 @@ class JsonObjectBuilder private constructor(jsonObject: JSONObject? = null) {
   }
 
   fun addArray(key: String, valueBuilder: JsonArrayBuilder.() -> Unit): JsonObjectBuilder {
-    jsonObject.put(key, JsonArrayBuilder.empty(valueBuilder).build())
+    jsonObject.put(key, JsonArrayBuilder.empty(valueBuilder).jsonArray)
     return this
   }
 
-  fun addObject(key: String, valueBuilder: JsonObjectBuilder.() -> Unit): JsonObjectBuilder {
-    jsonObject.put(key, empty(valueBuilder).build())
-    return this
-  }
+  fun addObject(key: String, extend: Boolean = false, valueBuilder: JsonObjectBuilder.() -> Unit): JsonObjectBuilder {
+    if (extend && jsonObject.has(key)) {
+      val existing = jsonObject.get(key)
 
-  fun build(): JSONObject {
-    return jsonObject
+      if (existing !is JSONObject)
+        throw IllegalStateException("Cannot extend $key of type ${existing.javaClass} with an object")
+
+      jsonObject.put(key, from(existing, valueBuilder).jsonObject)
+      return this
+    }
+
+    jsonObject.put(key, empty(valueBuilder).jsonObject)
+    return this
   }
 }

@@ -1,10 +1,13 @@
 package me.blvckbytes.openapigenerator.generator
 
 import com.fasterxml.jackson.annotation.JsonIgnore
-import me.blvckbytes.openapigenerator.*
+import me.blvckbytes.openapigenerator.DiscriminatorEnum
+import me.blvckbytes.openapigenerator.JarContainer
+import me.blvckbytes.openapigenerator.JavaClassFile
 import me.blvckbytes.openapigenerator.endpoint.EndpointMethod
 import me.blvckbytes.openapigenerator.endpoint.type.BuiltInType
 import me.blvckbytes.openapigenerator.endpoint.type.input.BuiltInEndpointInputType
+import me.blvckbytes.openapigenerator.endpoint.type.input.EndpointInputType
 import me.blvckbytes.openapigenerator.endpoint.type.input.InputSource
 import me.blvckbytes.openapigenerator.endpoint.type.input.JavaClassEndpointInputType
 import me.blvckbytes.openapigenerator.util.JsonObjectBuilder
@@ -20,8 +23,8 @@ import java.net.URLEncoder
 
 object OpenApiGenerator {
 
-  private val jsonIgnoreDescriptor = Util.makeDescriptor(JsonIgnore::class)
-  private val discriminatorEnumName = Util.makeName(DiscriminatorEnum::class)
+  private val JSON_IGNORE_DESCRIPTOR = Util.makeDescriptor(JsonIgnore::class)
+  private val DISCRIMINATOR_ENUM_NAME = Util.makeName(DiscriminatorEnum::class)
 
   fun generate(jar: JarContainer, endpoints: List<EndpointMethod>): String {
     val rootNode = JSONObject()
@@ -33,7 +36,7 @@ object OpenApiGenerator {
         addString("version", "v0")
       }
       addArray("servers") {
-        addObject() {
+        addObject {
           addString("url", "http://localhost:8000")
           addString("description", "Local development server")
         }
@@ -49,7 +52,7 @@ object OpenApiGenerator {
     rootNode.put("components", componentsNode)
 
     val endpointNodeByAbsolutePath = mutableMapOf<String, JSONObject>()
-    val createdSchemasByName = mutableMapOf<String, JavaClassFile>()
+    val generatorState = GeneratorState(jar, mutableMapOf(), pathsNode, schemasNode)
 
     for (endpoint in endpoints) {
       val pathNode = endpointNodeByAbsolutePath.computeIfAbsent(endpoint.absoluteRequestPath) {
@@ -58,20 +61,93 @@ object OpenApiGenerator {
         node
       }
 
-      appendEndpointToPathNode(endpoint, pathNode, createdSchemasByName, jar, schemasNode)
+      appendEndpointToPathNode(generatorState, endpoint, pathNode)
     }
 
     // TODO: This is a stupid hack, but I have no idea why this library insists of escaping /
     return rootNode.toString(2).replace("\\/", "/")
   }
 
-  private fun appendEndpointToPathNode(
-    endpoint: EndpointMethod,
-    pathNode: JSONObject,
-    createdSchemasByName: MutableMap<String, JavaClassFile>,
-    jar: JarContainer,
-    schemasNode: JSONObject
+  private fun generateSchemaAndPutRefValue(
+    generatorState: GeneratorState,
+    javaClass: JavaClassFile,
+    genericTypes: Array<JavaClassFile>?,
+    node: JSONObject,
   ) {
+    node.put("\$ref", makeRefValue(generateSchema(generatorState, javaClass, genericTypes)))
+  }
+
+  private fun appendParameterToEndpoint(
+    generatorState: GeneratorState,
+    parameterType: EndpointInputType,
+    parametersNode: JSONArray,
+    methodNode: JSONObject,
+    endpoint: EndpointMethod,
+    bodyIsSingleJavaClassRef: Boolean,
+  ) {
+    if (parameterType.inputSource == InputSource.BODY) {
+      JsonObjectBuilder.fromKeyOrCreate(methodNode, "requestBody") {
+        addObject("content", extend = true) {
+          addObject(endpoint.requestContentType, extend = true) {
+            addObject("schema", extend = true) schemaObject@ {
+
+              if (bodyIsSingleJavaClassRef) {
+                if (parameterType !is JavaClassEndpointInputType)
+                  throw IllegalStateException("Expected java class input type")
+
+                generateSchemaAndPutRefValue(generatorState, parameterType.javaClass, null, jsonObject)
+                return@schemaObject
+              }
+
+              addString("type", "object")
+              addObject("properties", extend = true) {
+                addObject(parameterType.name) {
+                  when (parameterType) {
+                    is BuiltInEndpointInputType -> appendTypeAndFormatForBuiltIn(parameterType.type, this.jsonObject)
+                    is JavaClassEndpointInputType -> generateSchemaAndPutRefValue(generatorState, parameterType.javaClass, null, jsonObject)
+                    else -> throw IllegalStateException("Unimplemented parameter type ${parameterType.javaClass}")
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      return
+    }
+
+    val parameterNode = JSONObject()
+    parametersNode.put(parameterNode)
+
+    parameterNode.put("name", parameterType.name)
+
+    val parameterSchemaNode = JSONObject()
+    parameterNode.put("schema", parameterSchemaNode)
+
+    if (parameterType.inputSource == InputSource.PATH) {
+      parameterNode.put("in", "path")
+      parameterNode.put("required", true)
+
+      if (parameterType !is BuiltInEndpointInputType)
+        throw IllegalStateException("Non-builtins are not supported in source PATH")
+
+      appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
+      return
+    }
+
+    // PARAMETER
+
+    parameterNode.put("in", "query")
+    // TODO: Field(s) required flag
+
+    when (parameterType) {
+      is BuiltInEndpointInputType -> appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
+      is JavaClassEndpointInputType -> generateSchemaAndPutRefValue(generatorState, parameterType.javaClass, null, parameterSchemaNode)
+      else -> throw IllegalStateException("Unimplemented parameter type $parameterType")
+    }
+  }
+
+  private fun appendEndpointToPathNode(generatorState: GeneratorState, endpoint: EndpointMethod, pathNode: JSONObject) {
     val methodNode = JSONObject()
     pathNode.put(endpoint.requestMethod.name.lowercase(), methodNode)
 
@@ -79,89 +155,22 @@ object OpenApiGenerator {
     methodNode.put("tags", tagsNode)
     tagsNode.put(makeTag(endpoint))
 
+    // Parameters
+
     val parametersNode = JSONArray()
     methodNode.put("parameters", parametersNode)
 
+    val bodyParameters = endpoint.parameterTypes.filter { it.inputSource == InputSource.BODY }
+    val bodyIsSingleJavaClassRef = bodyParameters.size == 1 && bodyParameters[0] is JavaClassEndpointInputType
+
     for (parameterType in endpoint.parameterTypes) {
-      when (parameterType.inputSource) {
-        InputSource.PATH,
-        InputSource.PARAMETER -> {
-          val parameterNode = JSONObject()
-          parametersNode.put(parameterNode)
-
-          parameterNode.put("name", parameterType.name)
-
-          val parameterSchemaNode = JSONObject()
-          parameterNode.put("schema", parameterSchemaNode)
-
-          if (parameterType.inputSource == InputSource.PATH) {
-            parameterNode.put("in", "path")
-            parameterNode.put("required", true)
-
-            if (parameterType !is BuiltInEndpointInputType)
-              throw IllegalStateException("Non-builtins are not supported in source PATH")
-
-            appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
-            continue
-          }
-
-          // PARAMETER
-
-          parameterNode.put("in", "query")
-          // TODO: Field(s) required flag
-
-          when (parameterType) {
-            is BuiltInEndpointInputType -> {
-              if (parameterType.type == BuiltInType.TYPE_MULTIPART_FILE) {
-                /*
-                  requestBody:
-                    content:
-                      multipart/form-data:
-                        schema:
-                          type: object
-                          properties:
-                            ...
-                 */
-                // TODO: Create a body entry, remember that it's form-data and
-                //       always append if this type is found. Also, what happens to other parameters
-                //       which have no annotation? Do they automatically need to go in here?
-                continue
-              }
-
-              appendTypeAndFormatForBuiltIn(parameterType.type, parameterSchemaNode)
-            }
-            is JavaClassEndpointInputType -> {
-              val schemaName = generateSchema(parameterType.javaClass, null, jar, schemasNode, createdSchemasByName)
-              parameterSchemaNode.put("\$ref", makeRefValue(schemaName))
-            }
-            else -> throw IllegalStateException("Unimplemented parameter type $parameterType")
-          }
-        }
-
-        InputSource.BODY -> {
-          if (methodNode.has("requestBody"))
-            throw IllegalStateException("A single endpoint cannot have multiple request bodies")
-
-          val requestBodyNode = JSONObject()
-          methodNode.put("requestBody", requestBodyNode)
-
-          val contentNode = JSONObject()
-          requestBodyNode.put("content", contentNode)
-
-          val contentTypeNode = JSONObject()
-          contentNode.put("application/json", contentTypeNode)
-
-          val schemaNode = JSONObject()
-          contentTypeNode.put("schema", schemaNode)
-
-          if (parameterType !is JavaClassEndpointInputType)
-            throw IllegalStateException("Non-java-class are not supported in source BODY")
-
-          val schemaName = generateSchema(parameterType.javaClass, null, jar, schemasNode, createdSchemasByName)
-          schemaNode.put("\$ref", makeRefValue(schemaName))
-        }
-      }
+      appendParameterToEndpoint(
+        generatorState, parameterType, parametersNode,
+        methodNode, endpoint, bodyIsSingleJavaClassRef,
+      )
     }
+
+    // Responses
 
     val responsesNode = JSONObject()
     methodNode.put("responses", responsesNode)
@@ -171,12 +180,10 @@ object OpenApiGenerator {
         addString("description", endpoint.successResponseCode.name)
 
         endpoint.returnType?.let {
-          val returnTypeSchemaName = generateSchema(it.javaClass, it.generics, jar, schemasNode, createdSchemasByName)
-
           addObject("content") {
             addObject("application/json") {
               addObject("schema") {
-                addString("\$ref", makeRefValue(returnTypeSchemaName))
+                generateSchemaAndPutRefValue(generatorState, it.javaClass, it.generics, jsonObject)
               }
             }
           }
@@ -247,6 +254,10 @@ object OpenApiGenerator {
       BuiltInType.TYPE_BOOLEAN -> {
         node.put("type", "boolean")
       }
+      BuiltInType.TYPE_MULTIPART_FILE -> {
+        node.put("type", "string")
+        node.put("format", "binary")
+      }
       else -> throw IllegalStateException("Type and format not implemented for $type")
     }
   }
@@ -277,29 +288,25 @@ object OpenApiGenerator {
   }
 
   private fun createAndAppendOneOfNode(
+    generatorState: GeneratorState,
     extendingClasses: List<JavaClassFile>,
     schemaNode: JSONObject,
-    jar: JarContainer,
-    schemasNode: JSONObject,
-    createdSchemasByName: MutableMap<String, JavaClassFile>
   ) {
     val possibleSchemasArray = JSONArray()
     schemaNode.put("oneOf", possibleSchemasArray)
 
     for (extendingClass in extendingClasses) {
       val possibleSchema = JSONObject()
-      val generatedSchemaName = generateSchema(extendingClass, null, jar, schemasNode, createdSchemasByName)
+      val generatedSchemaName = generateSchema(generatorState, extendingClass, null)
       possibleSchema.put("\$ref", makeRefValue(generatedSchemaName))
       possibleSchemasArray.put(possibleSchema)
     }
   }
 
   private fun createAndAppendDiscriminatorNode(
+    generatorState: GeneratorState,
     extendingClasses: List<JavaClassFile>,
     schemaNode: JSONObject,
-    jar: JarContainer,
-    schemasNode: JSONObject,
-    createdSchemasByName: MutableMap<String, JavaClassFile>
   ) {
     var commonDiscriminatorField: FieldNode? = null
 
@@ -307,9 +314,9 @@ object OpenApiGenerator {
       var discriminatorField: FieldNode? = null
 
       for (extendingClassField in extendingClass.classNode.fields) {
-        val fieldClass = jar.tryLocateClassByDescriptor(extendingClassField.desc) ?: continue
+        val fieldClass = generatorState.jar.tryLocateClassByDescriptor(extendingClassField.desc) ?: continue
 
-        if (jar.doesExtend(fieldClass, discriminatorEnumName)) {
+        if (generatorState.jar.doesExtend(fieldClass, DISCRIMINATOR_ENUM_NAME)) {
           if (discriminatorField != null)
             throw IllegalStateException("$extendingClass has more than one discriminator field")
           discriminatorField = extendingClassField
@@ -331,7 +338,7 @@ object OpenApiGenerator {
     if (commonDiscriminatorField == null)
       throw IllegalStateException("Could not decide on the discriminator field of $javaClass")
 
-    val discriminatorClass = jar.locateClassByDescriptor(commonDiscriminatorField.desc)
+    val discriminatorClass = generatorState.jar.locateClassByDescriptor(commonDiscriminatorField.desc)
 
     if (discriminatorClass.classNode.access and Opcodes.ACC_ENUM == 0)
       throw IllegalStateException("Discriminator field ${commonDiscriminatorField.name} of $javaClass is not an enum")
@@ -380,7 +387,7 @@ object OpenApiGenerator {
             throw IllegalStateException("Encountered a type constant before it's matching string constant")
 
           val typeDescriptor = constant.toString()
-          val typeSchemaName = generateSchema(jar.locateClassByDescriptor(typeDescriptor), null, jar, schemasNode, createdSchemasByName)
+          val typeSchemaName = generateSchema(generatorState, generatorState.jar.locateClassByDescriptor(typeDescriptor), null)
           discriminatorConstantToSchemaName[lastConstantName] = typeSchemaName
         }
 
@@ -401,9 +408,7 @@ object OpenApiGenerator {
   }
 
   private fun createAndAppendTypedArray(
-    jar: JarContainer,
-    createdSchemasByName: MutableMap<String, JavaClassFile>,
-    schemasNode: JSONObject,
+    generatorState: GeneratorState,
     property: JSONObject,
     field: FieldNode
   ) {
@@ -418,10 +423,10 @@ object OpenApiGenerator {
       return
     }
 
-    val arrayType = jar.locateClassByDescriptor(field.desc.substring(1))
+    val arrayType = generatorState.jar.locateClassByDescriptor(field.desc.substring(1))
 
     val refObject = JSONObject()
-    val generatedSchemaName = generateSchema(arrayType, null, jar, schemasNode, createdSchemasByName)
+    val generatedSchemaName = generateSchema(generatorState, arrayType, null)
     refObject.put("\$ref", makeRefValue(generatedSchemaName))
 
     property.put("type", "array")
@@ -429,11 +434,9 @@ object OpenApiGenerator {
   }
 
   private fun createAndAppendGenericArray(
+    generatorState: GeneratorState,
     javaClass: JavaClassFile,
     genericTypes: Array<JavaClassFile>?,
-    jar: JarContainer,
-    createdSchemasByName: MutableMap<String, JavaClassFile>,
-    schemasNode: JSONObject,
     property: JSONObject,
     field: FieldNode
   ) {
@@ -466,9 +469,9 @@ object OpenApiGenerator {
       genericType = genericTypes.getOrNull(genericPlaceholderIndex)
         ?: throw IllegalStateException("No match for generic placeholder index $genericPlaceholderIndex")
     } else
-      genericType = jar.locateClassByDescriptor(genericPlaceholderDescriptor)
+      genericType = generatorState.jar.locateClassByDescriptor(genericPlaceholderDescriptor)
 
-    val generatedSchemaName = generateSchema(genericType, null, jar, schemasNode, createdSchemasByName)
+    val generatedSchemaName = generateSchema(generatorState, genericType, null)
     refObject.put("\$ref", makeRefValue(generatedSchemaName))
 
     property.put("type", "array")
@@ -476,11 +479,9 @@ object OpenApiGenerator {
   }
 
   private fun createAndAppendObjectProperties(
+    generatorState: GeneratorState,
     javaClass: JavaClassFile,
     genericTypes: Array<JavaClassFile>?,
-    jar: JarContainer,
-    createdSchemasByName: MutableMap<String, JavaClassFile>,
-    schemasNode: JSONObject,
     schemaNode: JSONObject,
   ) {
     schemaNode.put("type", "object")
@@ -488,7 +489,7 @@ object OpenApiGenerator {
     val propertyMap = JSONObject()
 
     fieldIterator@ for (field in javaClass.classNode.fields) {
-      if (field.visibleAnnotations?.any { it.desc == jsonIgnoreDescriptor } == true)
+      if (field.visibleAnnotations?.any { it.desc == JSON_IGNORE_DESCRIPTOR } == true)
         continue@fieldIterator
 
       if (field.access and Opcodes.ACC_STATIC != 0)
@@ -503,15 +504,14 @@ object OpenApiGenerator {
 
       else {
         if (field.desc == "Ljava/util/List;" || field.desc == "Ljava/util/Collection;" || field.desc == "Ljava/util/Set;")
-          createAndAppendGenericArray(javaClass, genericTypes, jar, createdSchemasByName, schemasNode, property, field)
+          createAndAppendGenericArray(generatorState, javaClass, genericTypes, property, field)
 
         else if (field.desc.startsWith('['))
-          createAndAppendTypedArray(jar, createdSchemasByName, schemasNode, property, field)
+          createAndAppendTypedArray(generatorState, property, field)
 
         else {
           property.put("\$ref", makeRefValue(generateSchema(
-            jar.locateClassByDescriptor(field.desc), null,
-            jar, schemasNode, createdSchemasByName
+            generatorState, generatorState.jar.locateClassByDescriptor(field.desc), null,
           )))
         }
       }
@@ -523,24 +523,19 @@ object OpenApiGenerator {
     schemaNode.put("properties", propertyMap)
   }
 
-  private fun makeSchemaName(
-    javaClass: JavaClassFile,
-    genericTypes: Array<JavaClassFile>?,
-  ): String {
+  private fun makeSchemaName(javaClass: JavaClassFile, genericTypes: Array<JavaClassFile>?): String {
     if (genericTypes == null)
       return javaClass.simpleName
     return "${javaClass.simpleName}__" + genericTypes.joinToString(separator = "_") { it.simpleName }
   }
 
   private fun generateSchema(
+    generatorState: GeneratorState,
     javaClass: JavaClassFile,
     genericTypes: Array<JavaClassFile>?,
-    jar: JarContainer,
-    schemasNode: JSONObject,
-    createdSchemasByName: MutableMap<String, JavaClassFile>
   ): String {
     val schemaName = makeSchemaName(javaClass, genericTypes)
-    val existingSchemaWithThisName = createdSchemasByName.put(schemaName, javaClass)
+    val existingSchemaWithThisName = generatorState.createdSchemasByName.put(schemaName, javaClass)
 
     if ((existingSchemaWithThisName) != null) {
       if (existingSchemaWithThisName == javaClass)
@@ -555,19 +550,19 @@ object OpenApiGenerator {
       appendTypeAndEnumConstantsForEnum(javaClass, schemaNode)
 
     else if (javaClass.classNode.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT) != 0) {
-      val extendingClasses = jar.findTypesThatExtendReturnType(javaClass)
+      val extendingClasses = generatorState.jar.findTypesThatExtendReturnType(javaClass)
 
       if (extendingClasses.isEmpty())
         throw IllegalStateException("$javaClass has no implementations")
 
-      createAndAppendOneOfNode(extendingClasses, schemaNode, jar, schemasNode, createdSchemasByName)
-      createAndAppendDiscriminatorNode(extendingClasses, schemaNode, jar, schemasNode, createdSchemasByName)
+      createAndAppendOneOfNode(generatorState, extendingClasses, schemaNode)
+      createAndAppendDiscriminatorNode(generatorState, extendingClasses, schemaNode)
     }
 
     else
-      createAndAppendObjectProperties(javaClass, genericTypes, jar, createdSchemasByName, schemasNode, schemaNode)
+      createAndAppendObjectProperties(generatorState, javaClass, genericTypes, schemaNode)
 
-    schemasNode.put(schemaName, schemaNode)
+    generatorState.schemasNode.put(schemaName, schemaNode)
     return schemaName
   }
 }

@@ -9,6 +9,7 @@ class EndpointMethod(
   val returnType: JavaClassEndpointOutputType?,
   val parameterTypes: List<EndpointInputType>,
   val requestMethod: RequestMethod,
+  val requestContentType: String,
   val absoluteRequestPath: String,
   val successResponseCode: HttpStatus
 ) {
@@ -17,6 +18,7 @@ class EndpointMethod(
 
     result.append("EndpointMethod {")
     result.append("\nendpoint: $requestMethod $absoluteRequestPath ($successResponseCode)")
+    result.append("\ncontent-type: $requestContentType")
 
     for (parameterIndex in parameterTypes.indices) {
       result.append("\nparameter $parameterIndex: ${parameterTypes[parameterIndex]}")
