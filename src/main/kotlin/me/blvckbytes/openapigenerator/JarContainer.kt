@@ -2,26 +2,38 @@ package me.blvckbytes.openapigenerator
 
 class JarContainer(
   private val classFileByPath: Map<String, JavaClassFile>,
+  methodInvocationOwnerPredicate: (classFilePath: String) -> Boolean,
   controllerPredicate: (classFilePath: String) -> Boolean,
   returnTypePredicate: (classFilePath: String) -> Boolean,
 ) {
 
-  private val returnTypeClassFileByPath: Map<String, JavaClassFile>
+  private val returnTypeClassFiles: List<JavaClassFile>
+  private val methodInvocationOwnerClassFiles: List<JavaClassFile>
 
-  val controllerPackagePaths: List<String>
-  private val returnTypePackagePaths: List<String>
+  val controllerPackagePaths: HashSet<String>
+  val methodInvocationOwnerPaths: HashSet<String>
+  private val returnTypePackagePaths: HashSet<String>
 
   init {
-    controllerPackagePaths = classFileByPath.keys.filter(controllerPredicate).toList()
-    returnTypePackagePaths = classFileByPath.keys.filter(returnTypePredicate).toList()
+    controllerPackagePaths = classFileByPath.keys.filter(controllerPredicate).toHashSet()
+    returnTypePackagePaths = classFileByPath.keys.filter(returnTypePredicate).toHashSet()
+    methodInvocationOwnerPaths = classFileByPath.keys.filter(methodInvocationOwnerPredicate).toHashSet()
 
-    returnTypeClassFileByPath = classFileByPath.filter {
-      for (returnTypePackage in returnTypePackagePaths) {
-        if (it.key.startsWith(returnTypePackage))
-          return@filter true
+    returnTypeClassFiles = filterClassFilesByPaths(returnTypePackagePaths)
+    methodInvocationOwnerClassFiles = filterClassFilesByPaths(methodInvocationOwnerPaths)
+  }
+
+  private fun filterClassFilesByPaths(paths: HashSet<String>): List<JavaClassFile> {
+    val result = mutableListOf<JavaClassFile>()
+
+    for (classEntry in classFileByPath) {
+      for (path in paths) {
+        if (classEntry.key.startsWith(path))
+          result.add(classEntry.value)
       }
-      false
     }
+
+    return result
   }
 
   val classes: Collection<Map.Entry<String, JavaClassFile>>
@@ -30,6 +42,10 @@ class JarContainer(
   fun locateClassByPath(path: String): JavaClassFile {
     return classFileByPath[path]
       ?: throw IllegalStateException("Could not locate class by path $path")
+  }
+
+  fun tryLocateClassByPath(path: String): JavaClassFile? {
+    return classFileByPath[path]
   }
 
   fun locateClassByDescriptor(descriptor: String): JavaClassFile {
@@ -47,14 +63,22 @@ class JarContainer(
   }
 
   fun findTypesThatExtendReturnType(returnType: JavaClassFile): List<JavaClassFile> {
+    return findTypesThatExtendFromItems(returnType, returnTypeClassFiles)
+  }
+
+  fun findTypesThatExtendMethodInvocationOwnerType(ownerType: JavaClassFile): List<JavaClassFile> {
+    return findTypesThatExtendFromItems(ownerType, methodInvocationOwnerClassFiles)
+  }
+
+  private fun findTypesThatExtendFromItems(type: JavaClassFile, items: Collection<JavaClassFile>): List<JavaClassFile> {
     val result = mutableListOf<JavaClassFile>()
 
-    for (returnTypeItem in returnTypeClassFileByPath.values) {
-      if (returnTypeItem == returnType)
+    for (item in items) {
+      if (item == type)
         continue
 
-      if (doesExtend(returnTypeItem, returnType.classNode.name))
-        result.add(returnTypeItem)
+      if (doesExtend(item, type.classNode.name))
+        result.add(item)
     }
 
     return result

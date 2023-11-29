@@ -2,6 +2,8 @@ package me.blvckbytes.openapigenerator
 
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.MethodNode
+import java.io.File
 
 class JavaClassFile(
   private val name: String,
@@ -28,7 +30,44 @@ class JavaClassFile(
     return name.substring(lastDotIndex + 1)
   }
 
+  fun tryFindMethod(jar: JarContainer, name: String, descriptor: String?): MethodNode? {
+    for (method in classNode.methods) {
+      if ((descriptor == null || method.desc == descriptor) && method.name == name)
+        return method
+    }
+
+    if (classNode.superName == null)
+      return null
+
+    if (!jar.methodInvocationOwnerPaths.contains(classNode.superName))
+      return null
+
+    return jar.tryLocateClassByPath(classNode.superName)?.tryFindMethod(jar, name, descriptor)
+  }
+
+  // A quite convenient helper while debugging.
+  fun dumpTo(absolutePath: String) {
+    val file = File(absolutePath)
+
+    if (!file.exists())
+      file.createNewFile()
+
+    file.writeBytes(this.bytes)
+  }
+
   override fun toString(): String {
     return name
+  }
+
+  override fun hashCode(): Int {
+    return classNode.name.hashCode()
+  }
+
+  override fun equals(other: Any?): Boolean {
+    if (this === other) return true
+    if (javaClass != other?.javaClass) return false
+
+    other as JavaClassFile
+    return classNode.name == other.classNode.name
   }
 }

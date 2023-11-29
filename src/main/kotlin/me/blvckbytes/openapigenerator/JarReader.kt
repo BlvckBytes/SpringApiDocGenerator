@@ -7,6 +7,7 @@ object JarReader {
 
   fun readJar(
     jarPath: String,
+    methodInvocationOwnerPredicate: (classFilePath: String) -> Boolean,
     controllerPredicate: (classFilePath: String) -> Boolean,
     returnTypePredicate: (classFilePath: String) -> Boolean
   ): JarContainer {
@@ -16,6 +17,7 @@ object JarReader {
         collectClassFiles(ZipInputStream(it), result)
         result
       },
+      methodInvocationOwnerPredicate,
       controllerPredicate, returnTypePredicate
     )
   }

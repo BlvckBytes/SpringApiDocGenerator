@@ -16,6 +16,7 @@ fun main() {
   val start = System.nanoTime()
   val jar = JarReader.readJar(
     inputJarPath,
+    { filePath -> filePath.startsWith("me/blvckbytes/") },
     { extractClassNameFromPath(it).endsWith("Controller") },
     { extractClassNameFromPath(it).contains("Dto") }
   )
