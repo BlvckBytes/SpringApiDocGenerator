@@ -21,6 +21,7 @@ import org.objectweb.asm.tree.VarInsnNode
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.web.bind.annotation.*
+import java.util.Stack
 import java.util.logging.*
 import kotlin.collections.ArrayList
 
@@ -306,7 +307,12 @@ object EndpointParser {
     // TODO: Continue working on this
     if (exceptionsThrown.size > 0) {
       println("\nMethod ${methodNode.name} throws:")
-      exceptionsThrown.forEach { println(it.simpleName) }
+      exceptionsThrown.forEach {
+        print("${it.classFile.simpleName}: ")
+        println(it.methodStack.joinToString { classMethod ->
+          "${classMethod.containingClass.simpleName}#${classMethod.method.name}()"
+        })
+      }
     }
 
     return EndpointMethod(
@@ -323,10 +329,11 @@ object EndpointParser {
     jar: JarContainer,
     owner: JavaClassFile,
     methodNode: MethodNode
-  ): HashSet<JavaClassFile> {
-    val result = HashSet<JavaClassFile>()
+  ): HashSet<ThrownException> {
+    val result = HashSet<ThrownException>()
     val visitedMethods = HashSet<String>()
-    collectThrownExceptions(jar, owner, methodNode, visitedMethods, result)
+    val methodStack = Stack<ClassMethod>()
+    collectThrownExceptions(jar, owner, methodNode, methodStack, visitedMethods, result)
     return result
   }
 
@@ -335,8 +342,9 @@ object EndpointParser {
     desc: String,
     name: String,
     jar: JarContainer,
+    methodStack: Stack<ClassMethod>,
     visitedMethods: MutableSet<String>,
-    list: HashSet<JavaClassFile>
+    list: HashSet<ThrownException>
   ) {
     if (!jar.methodInvocationOwnerPaths.contains(ownerClass.classNode.name)) {
       logger.finest("ignore $ownerClass")
@@ -354,7 +362,7 @@ object EndpointParser {
     // so it's throw statements have to be collected as well.
     if (jar.doesExtend(ownerClass, kotlinLambdaName)) {
       ownerClass.tryFindMethod(jar, "invoke", null)?.let {
-        handleMethodInvocationInstruction(ownerClass, it.desc, it.name, jar, visitedMethods, list)
+        handleMethodInvocationInstruction(ownerClass, it.desc, it.name, jar, methodStack, visitedMethods, list)
       }
     }
 
@@ -371,14 +379,14 @@ object EndpointParser {
         throw IllegalStateException("Found unimplemented but called interface/abstract class: $ownerClass")
 
       for (ownerClassImplementation in ownerClassImplementations)
-        handleMethodInvocationInstruction(ownerClassImplementation, desc, name, jar, visitedMethods, list)
+        handleMethodInvocationInstruction(ownerClassImplementation, desc, name, jar, methodStack, visitedMethods, list)
 
       return
     }
 
     val targetMethod = ownerClass.tryFindMethod(jar, name, desc) ?: return
 
-    collectThrownExceptions(jar, ownerClass, targetMethod, visitedMethods, list)
+    collectThrownExceptions(jar, ownerClass, targetMethod, methodStack, visitedMethods, list)
   }
 
   private fun isValidOpcode(opcode: Int): Boolean {
@@ -398,19 +406,30 @@ object EndpointParser {
   private fun addExceptionByNameIfInPaths(
     jar: JarContainer,
     name: String,
-    list: HashSet<JavaClassFile>
+    methodStack: Stack<ClassMethod>,
+    list: HashSet<ThrownException>,
   ) {
-    if (jar.methodInvocationOwnerPaths.contains(name))
-      list.add(jar.locateClassByPath(name))
+    if (!jar.methodInvocationOwnerPaths.contains(name))
+      return
+
+    val methodStackCopy = Stack<ClassMethod>()
+    methodStackCopy.addAll(methodStack)
+
+    list.add(ThrownException(
+      jar.locateClassByPath(name),
+      methodStackCopy
+    ))
   }
 
   private fun collectThrownExceptions(
     jar: JarContainer,
     owner: JavaClassFile,
     methodNode: MethodNode,
+    methodStack: Stack<ClassMethod>,
     visitedMethods: MutableSet<String>,
-    list: HashSet<JavaClassFile>
+    list: HashSet<ThrownException>
   ) {
+    methodStack.push(ClassMethod(owner, methodNode))
     logger.fine("enter $owner :: ${methodNode.name}: ${methodNode.desc}")
 
     for (instructionIndex in 0 until methodNode.instructions.size()) {
@@ -450,19 +469,19 @@ object EndpointParser {
             }
 
             else if (previousInstruction.opcode == Opcodes.INVOKEVIRTUAL)
-              addExceptionByNameIfInPaths(jar, Type.getMethodType(previousInstruction.desc).returnType.internalName, list)
+              addExceptionByNameIfInPaths(jar, Type.getMethodType(previousInstruction.desc).returnType.internalName, methodStack, list)
 
             else
               throw IllegalStateException("Unaccounted-for invocation opcode: $previousInstructionOpcodeName")
 
-            addExceptionByNameIfInPaths(jar, previousInstruction.owner, list)
+            addExceptionByNameIfInPaths(jar, previousInstruction.owner, methodStack, list)
             continue
           }
 
           if (previousInstruction is VarInsnNode) {
             val loadedVariable = methodNode.localVariables[previousInstruction.`var`]
 
-            addExceptionByNameIfInPaths(jar, loadedVariable.desc, list)
+            addExceptionByNameIfInPaths(jar, Type.getType(loadedVariable.desc).internalName, methodStack, list)
             continue
           }
 
@@ -472,29 +491,19 @@ object EndpointParser {
         continue
       }
 
-
-      /*
-        invokevirtual (b6) normal class methods
-        invokestatic (b8) static methods
-        invokeinterface (b9) interface methods
-        invokespecial (b7) constructors or private methods
-
-        invokedynamic (ba)
-        When the JVM sees an invokedynamic opcode for the first time, it calls a special method known as
-        the bootstrap method to initialize the invocation process.
-       */
       if (instruction is MethodInsnNode) {
         val ownerClass = jar.tryLocateClassByPath(instruction.owner) ?: continue
-        handleMethodInvocationInstruction(ownerClass, instruction.desc, instruction.name, jar, visitedMethods, list)
+        handleMethodInvocationInstruction(ownerClass, instruction.desc, instruction.name, jar, methodStack, visitedMethods, list)
         continue
       }
 
       if (instruction is InvokeDynamicInsnNode) {
-        // TODO: The bootstrap method (bsm) just bootstraps the actual CallSite that also should be checked out
-//        handleMethodInvocationInstruction(instruction.bsm.owner, instruction.bsm.desc, instruction.name, jar, visitedMethods, list)
+        val ownerClass = jar.tryLocateClassByPath(instruction.bsm.owner) ?: continue
+        handleMethodInvocationInstruction(ownerClass, instruction.bsm.desc, instruction.bsm.name, jar, methodStack, visitedMethods, list)
         continue
       }
     }
+    methodStack.pop()
     logger.fine("exit $owner :: ${methodNode.name}: ${methodNode.desc}")
   }
 
