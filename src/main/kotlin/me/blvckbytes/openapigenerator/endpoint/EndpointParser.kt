@@ -9,6 +9,7 @@ import me.blvckbytes.openapigenerator.endpoint.type.input.EndpointInputType
 import me.blvckbytes.openapigenerator.endpoint.type.input.InputSource
 import me.blvckbytes.openapigenerator.endpoint.type.input.JavaClassEndpointInputType
 import me.blvckbytes.openapigenerator.endpoint.type.output.JavaClassEndpointOutputType
+import org.objectweb.asm.Handle
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.AbstractInsnNode
@@ -21,6 +22,7 @@ import org.objectweb.asm.tree.VarInsnNode
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.web.bind.annotation.*
+import java.lang.invoke.LambdaMetafactory
 import java.util.Stack
 import java.util.logging.*
 import kotlin.collections.ArrayList
@@ -89,6 +91,8 @@ object EndpointParser {
   private val pathVariableDescriptor = Util.makeDescriptor(PathVariable::class)
   private val httpStatusDescriptor = Util.makeDescriptor(HttpStatus::class)
   private val functionalInterfaceDescriptor = Util.makeDescriptor(FunctionalInterface::class)
+  private val lambdaMetafactoryName = Util.makeName(LambdaMetafactory::class)
+  private val lambdaMetafactoryFunctionName = LambdaMetafactory::metafactory.name
   private const val kotlinLambdaName = "kotlin/jvm/internal/Lambda"
 
   private fun parseMappingAnnotationPath(annotationValues: Map<String, Any>?): String {
@@ -498,9 +502,37 @@ object EndpointParser {
       }
 
       if (instruction is InvokeDynamicInsnNode) {
-        val ownerClass = jar.tryLocateClassByPath(instruction.bsm.owner) ?: continue
-        handleMethodInvocationInstruction(ownerClass, instruction.bsm.desc, instruction.bsm.name, jar, methodStack, visitedMethods, list)
-        continue
+        if (instruction.bsm.owner == lambdaMetafactoryName) {
+          if (instruction.bsm.name != lambdaMetafactoryFunctionName)
+            throw IllegalStateException("Expected $lambdaMetafactoryName#$lambdaMetafactoryFunctionName to be called, but found ${instruction.bsm.name}")
+
+          if (instruction.bsmArgs == null)
+            throw IllegalStateException("BSM received no arguments")
+
+          var targetHandle: Handle? = null
+
+          for (bsmArg in instruction.bsmArgs) {
+            if (bsmArg is Handle) {
+              if (targetHandle != null)
+                throw IllegalStateException("Found multiple BSM arguments of type Handle")
+
+              targetHandle = bsmArg
+            }
+          }
+
+          if (targetHandle == null)
+            throw IllegalStateException("Found no BSM argument of type Handle")
+
+          val ownerClass = jar.tryLocateClassByPath(targetHandle.owner) ?: continue
+          handleMethodInvocationInstruction(ownerClass, targetHandle.desc, targetHandle.name, jar, methodStack, visitedMethods, list)
+          continue
+        }
+
+        // java/lang/invoke/StringConcatFactory#makeConcatWithConstants is ignored, for now at least
+        if (instruction.name == "makeConcatWithConstants")
+          continue
+
+        throw IllegalStateException("Did not account for dynamic invocation: ${instruction.name} ${instruction.desc}")
       }
     }
     methodStack.pop()
