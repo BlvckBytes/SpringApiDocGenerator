@@ -9,13 +9,19 @@ import me.blvckbytes.openapigenerator.endpoint.type.input.EndpointInputType
 import me.blvckbytes.openapigenerator.endpoint.type.input.InputSource
 import me.blvckbytes.openapigenerator.endpoint.type.input.JavaClassEndpointInputType
 import me.blvckbytes.openapigenerator.endpoint.type.output.JavaClassEndpointOutputType
+import me.blvckbytes.propertyvalidation.validatior.ApplicableValidator
+import me.blvckbytes.propertyvalidation.validatior.NotNull
+import me.blvckbytes.propertyvalidation.validatior.NotNullAndNotBlank
+import me.blvckbytes.propertyvalidation.validatior.NullOrNotBlank
 import org.objectweb.asm.Handle
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.AbstractInsnNode
 import org.objectweb.asm.tree.AnnotationNode
+import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.InsnNode
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
+import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.MethodNode
 import org.objectweb.asm.tree.VarInsnNode
@@ -23,12 +29,15 @@ import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.web.bind.annotation.*
 import java.lang.invoke.LambdaMetafactory
+import java.lang.invoke.StringConcatFactory
 import java.util.Stack
 import java.util.logging.*
 import kotlin.collections.ArrayList
+import kotlin.jvm.internal.PropertyReference
 
-object EndpointParser {
-
+class EndpointParser(
+  private val jar: JarContainer
+) {
   private val opcodeNameByOpcode = arrayOfNulls<String>(0xFF)
 
   private val logger = Logger.getLogger(EndpointParser::class.qualifiedName)
@@ -83,17 +92,7 @@ object EndpointParser {
     Pair(Util.makeDescriptor(PatchMapping::class), RequestMethod.PATCH),
   )
 
-  private val requestMappingDescriptor = Util.makeDescriptor(RequestMapping::class)
-  private val responseStatusDescriptor = Util.makeDescriptor(ResponseStatus::class)
-  private val requestBodyDescriptor = Util.makeDescriptor(RequestBody::class)
-  private val requestParamDescriptor = Util.makeDescriptor(RequestParam::class)
-  private val requestPartDescriptor = Util.makeDescriptor(RequestPart::class)
-  private val pathVariableDescriptor = Util.makeDescriptor(PathVariable::class)
-  private val httpStatusDescriptor = Util.makeDescriptor(HttpStatus::class)
-  private val functionalInterfaceDescriptor = Util.makeDescriptor(FunctionalInterface::class)
-  private val lambdaMetafactoryName = Util.makeName(LambdaMetafactory::class)
-  private val lambdaMetafactoryFunctionName = LambdaMetafactory::metafactory.name
-  private const val kotlinLambdaName = "kotlin/jvm/internal/Lambda"
+  private val kotlinLambdaName = "kotlin/jvm/internal/Lambda"
 
   private fun parseMappingAnnotationPath(annotationValues: Map<String, Any>?): String {
     return (
@@ -132,7 +131,7 @@ object EndpointParser {
         val argumentAnnotationValues = Util.parseAnnotationValues(argumentAnnotation)
 
         when (argumentAnnotation.desc) {
-          pathVariableDescriptor -> {
+          Util.makeDescriptor(PathVariable::class) -> {
             return Pair(
               InputSource.PATH,
               argumentAnnotationValues?.let {
@@ -144,7 +143,7 @@ object EndpointParser {
               }
             )
           }
-          requestParamDescriptor -> {
+          Util.makeDescriptor(RequestParam::class) -> {
             return Pair(
               InputSource.PARAMETER,
               argumentAnnotationValues?.let {
@@ -156,10 +155,10 @@ object EndpointParser {
               }
             )
           }
-          requestBodyDescriptor -> {
+          Util.makeDescriptor(RequestBody::class) -> {
             return Pair(InputSource.BODY, null)
           }
-          requestPartDescriptor -> {
+          Util.makeDescriptor(RequestPart::class) -> {
             return Pair(
               InputSource.BODY,
               argumentAnnotationValues?.let {
@@ -184,9 +183,11 @@ object EndpointParser {
   }
 
   private fun parseSuccessResponseCode(methodNode: MethodNode): HttpStatus {
+    val httpStatusDescriptor = Util.makeDescriptor(HttpStatus::class)
+
     if (methodNode.visibleAnnotations != null) {
       for (annotation in methodNode.visibleAnnotations) {
-        if (annotation.desc != responseStatusDescriptor)
+        if (annotation.desc != Util.makeDescriptor(ResponseStatus::class))
           continue
 
         val annotationValues = Util.parseAnnotationValues(annotation) ?: continue
@@ -204,7 +205,7 @@ object EndpointParser {
     return HttpStatus.OK
   }
 
-  private fun parseReturnGenerics(methodNode: MethodNode, jar: JarContainer): Array<JavaClassFile>? {
+  private fun parseReturnGenerics(methodNode: MethodNode): Array<JavaClassFile>? {
     val signature = methodNode.signature ?: return null
     val returnType = signature.substring(signature.indexOf(')') + 1)
     val genericsBegin = returnType.indexOf('<')
@@ -220,7 +221,7 @@ object EndpointParser {
       .toTypedArray()
   }
 
-  private fun parseEndpoint(basePath: String, owner: JavaClassFile, methodNode: MethodNode, jar: JarContainer): EndpointMethod? {
+  private fun parseEndpoint(basePath: String, owner: JavaClassFile, methodNode: MethodNode): EndpointMethod? {
     if (methodNode.visibleAnnotations == null)
       return null
 
@@ -254,7 +255,7 @@ object EndpointParser {
       else
         JavaClassEndpointOutputType(
           jar.locateClassByPath(methodType.returnType.internalName),
-          parseReturnGenerics(methodNode, jar)
+          parseReturnGenerics(methodNode)
         )
       )
 
@@ -306,7 +307,7 @@ object EndpointParser {
       )
     }
 
-    val exceptionsThrown = recursivelyCollectThrownExceptions(jar, owner, methodNode)
+    val exceptionsThrown = recursivelyCollectThrownExceptions(owner, methodNode)
 
     // TODO: Continue working on this
     if (exceptionsThrown.size > 0) {
@@ -330,14 +331,13 @@ object EndpointParser {
   }
 
   private fun recursivelyCollectThrownExceptions(
-    jar: JarContainer,
     owner: JavaClassFile,
     methodNode: MethodNode
   ): HashSet<ThrownException> {
     val result = HashSet<ThrownException>()
     val visitedMethods = HashSet<String>()
     val methodStack = Stack<ClassMethod>()
-    collectThrownExceptions(jar, owner, methodNode, methodStack, visitedMethods, result)
+    collectThrownExceptions(owner, methodNode, methodStack, visitedMethods, result)
     return result
   }
 
@@ -345,7 +345,6 @@ object EndpointParser {
     ownerClass: JavaClassFile,
     desc: String,
     name: String,
-    jar: JarContainer,
     methodStack: Stack<ClassMethod>,
     visitedMethods: MutableSet<String>,
     list: HashSet<ThrownException>
@@ -366,14 +365,14 @@ object EndpointParser {
     // so it's throw statements have to be collected as well.
     if (jar.doesExtend(ownerClass, kotlinLambdaName)) {
       ownerClass.tryFindMethod(jar, "invoke", null)?.let {
-        handleMethodInvocationInstruction(ownerClass, it.desc, it.name, jar, methodStack, visitedMethods, list)
+        handleMethodInvocationInstruction(ownerClass, it.desc, it.name, methodStack, visitedMethods, list)
       }
     }
 
     if (ownerClass.classNode.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT) > 0) {
       // For now, at least, just skip functional interfaces
       if (ownerClass.classNode.visibleAnnotations?.any {
-        it.desc == functionalInterfaceDescriptor
+        it.desc == Util.makeDescriptor(FunctionalInterface::class)
       } == true)
         return
 
@@ -383,14 +382,14 @@ object EndpointParser {
         throw IllegalStateException("Found unimplemented but called interface/abstract class: $ownerClass")
 
       for (ownerClassImplementation in ownerClassImplementations)
-        handleMethodInvocationInstruction(ownerClassImplementation, desc, name, jar, methodStack, visitedMethods, list)
+        handleMethodInvocationInstruction(ownerClassImplementation, desc, name, methodStack, visitedMethods, list)
 
       return
     }
 
     val targetMethod = ownerClass.tryFindMethod(jar, name, desc) ?: return
 
-    collectThrownExceptions(jar, ownerClass, targetMethod, methodStack, visitedMethods, list)
+    collectThrownExceptions(ownerClass, targetMethod, methodStack, visitedMethods, list)
   }
 
   private fun isValidOpcode(opcode: Int): Boolean {
@@ -408,7 +407,6 @@ object EndpointParser {
   }
 
   private fun addExceptionByNameIfInPaths(
-    jar: JarContainer,
     name: String,
     methodStack: Stack<ClassMethod>,
     list: HashSet<ThrownException>,
@@ -425,8 +423,120 @@ object EndpointParser {
     ))
   }
 
+  private fun parseKotlinPropertyReference(javaClass: JavaClassFile): FieldReference {
+    val propertyReferenceName = Util.makeName(PropertyReference::class)
+
+    if (!jar.doesExtend(javaClass, propertyReferenceName))
+      throw IllegalStateException("$javaClass is not a property reference")
+
+    val constructor = javaClass.classNode.methods.firstOrNull { it.name == "<init>" }
+      ?: throw IllegalStateException("Could not locate constructor of $javaClass")
+
+    for (constructorInstructionIndex in 0 until constructor.instructions.size()) {
+      val constructorInstruction = constructor.instructions[constructorInstructionIndex]
+
+      if (constructorInstruction !is MethodInsnNode)
+        continue
+
+      if (constructorInstruction.name != "<init>")
+        continue
+
+      val methodOwner = jar.locateClassByPath(constructorInstruction.owner)
+
+      if (!jar.doesExtend(methodOwner, propertyReferenceName))
+        continue
+
+      val methodType = Type.getMethodType(constructorInstruction.desc)
+      val args = methodType.argumentTypes
+
+      if (args.size != 4)
+        throw IllegalStateException("Case of argument count being ${args.size} is not yet implemented")
+
+      // Member-containing class
+      if (args[0].internalName != Util.makeName(Class::class))
+        throw IllegalStateException("Expected first argument to be of type Class")
+
+      // Property name
+      if (args[1].descriptor != BuiltInType.TYPE_STRING.descriptor())
+        throw IllegalStateException("Expected second argument to be of type String")
+
+      // Property getter "descriptor"
+      if (args[2].descriptor != BuiltInType.TYPE_STRING.descriptor())
+        throw IllegalStateException("Expected third argument to be of type String")
+
+      // Flag bits
+      if (args[3].descriptor != "I")
+        throw IllegalStateException("Expected fourth argument to be of type int")
+
+      val propertyNameInstruction = constructor.instructions[constructorInstructionIndex - 3]
+      val containingClassInstruction = constructor.instructions[constructorInstructionIndex - 4]
+
+      if (propertyNameInstruction !is LdcInsnNode)
+        throw IllegalStateException("Expected property-name to be a constant")
+
+      if (propertyNameInstruction.cst !is String)
+        throw IllegalStateException("Expected property-name to be a constant String")
+
+      if (containingClassInstruction !is LdcInsnNode)
+        throw IllegalStateException("Expected containing-class to be a constant")
+
+      if (containingClassInstruction.cst !is Type)
+        throw IllegalStateException("Expected containing-class to be a constant Type")
+
+      return FieldReference(
+        jar.locateClassByPath((containingClassInstruction.cst as Type).internalName),
+        propertyNameInstruction.cst as String
+      )
+    }
+
+    throw IllegalStateException("Could not parse a kotlin property reference: $javaClass")
+  }
+
+  private fun parseValidatorConstructorInstruction(
+    methodNode: MethodNode,
+    ownerClass: JavaClassFile,
+    currentInstructionIndex: Int
+  ) {
+    // TODO: CompareToConstant, CompareToMinMax, CompareToOther
+    // constructor(field: KProperty, fieldValue: Any?)
+    if (
+      ownerClass.classNode.name == Util.makeName(NotNull::class) ||
+      ownerClass.classNode.name == Util.makeName(NotNullAndNotBlank::class) ||
+      ownerClass.classNode.name == Util.makeName(NullOrNotBlank::class)
+    ) {
+      for (instructionIndex in currentInstructionIndex - 1 downTo 0) {
+        val instruction = methodNode.instructions.get(instructionIndex)
+        val opcode = instruction.opcode
+
+        if (!isValidOpcode(opcode))
+          continue
+
+        if (opcode == Opcodes.CHECKCAST)
+          continue
+
+        if (instruction is FieldInsnNode) {
+          if (instruction.name != "INSTANCE")
+            continue
+
+          val fieldContainer = jar.locateClassByPath(instruction.owner)
+
+          val targetField = fieldContainer.classNode.fields.firstOrNull {
+            it.name == instruction.name && it.desc == instruction.desc
+          } ?: throw IllegalStateException("Could not locate field ${instruction.name} of $fieldContainer")
+
+          if (targetField.access and Opcodes.ACC_STATIC == 0)
+            throw IllegalStateException("Expected $fieldContainer#INSTANCE to be a static field")
+
+          val (containingClass, propertyName) = parseKotlinPropertyReference(fieldContainer)
+          println("${ownerClass.simpleName}: ${containingClass.simpleName}#$propertyName")
+        }
+      }
+
+      return
+    }
+  }
+
   private fun collectThrownExceptions(
-    jar: JarContainer,
     owner: JavaClassFile,
     methodNode: MethodNode,
     methodStack: Stack<ClassMethod>,
@@ -473,19 +583,19 @@ object EndpointParser {
             }
 
             else if (previousInstruction.opcode == Opcodes.INVOKEVIRTUAL)
-              addExceptionByNameIfInPaths(jar, Type.getMethodType(previousInstruction.desc).returnType.internalName, methodStack, list)
+              addExceptionByNameIfInPaths(Type.getMethodType(previousInstruction.desc).returnType.internalName, methodStack, list)
 
             else
               throw IllegalStateException("Unaccounted-for invocation opcode: $previousInstructionOpcodeName")
 
-            addExceptionByNameIfInPaths(jar, previousInstruction.owner, methodStack, list)
+            addExceptionByNameIfInPaths(previousInstruction.owner, methodStack, list)
             continue
           }
 
           if (previousInstruction is VarInsnNode) {
             val loadedVariable = methodNode.localVariables[previousInstruction.`var`]
 
-            addExceptionByNameIfInPaths(jar, Type.getType(loadedVariable.desc).internalName, methodStack, list)
+            addExceptionByNameIfInPaths(Type.getType(loadedVariable.desc).internalName, methodStack, list)
             continue
           }
 
@@ -497,11 +607,18 @@ object EndpointParser {
 
       if (instruction is MethodInsnNode) {
         val ownerClass = jar.tryLocateClassByPath(instruction.owner) ?: continue
-        handleMethodInvocationInstruction(ownerClass, instruction.desc, instruction.name, jar, methodStack, visitedMethods, list)
+
+        if (instruction.name == "<init>" && jar.doesExtend(ownerClass, Util.makeName(ApplicableValidator::class)))
+          parseValidatorConstructorInstruction(methodNode, ownerClass, instructionIndex)
+
+        handleMethodInvocationInstruction(ownerClass, instruction.desc, instruction.name, methodStack, visitedMethods, list)
         continue
       }
 
       if (instruction is InvokeDynamicInsnNode) {
+        val lambdaMetafactoryName = Util.makeName(LambdaMetafactory::class)
+        val lambdaMetafactoryFunctionName = LambdaMetafactory::metafactory.name
+
         if (instruction.bsm.owner == lambdaMetafactoryName) {
           if (instruction.bsm.name != lambdaMetafactoryFunctionName)
             throw IllegalStateException("Expected $lambdaMetafactoryName#$lambdaMetafactoryFunctionName to be called, but found ${instruction.bsm.name}")
@@ -524,12 +641,12 @@ object EndpointParser {
             throw IllegalStateException("Found no BSM argument of type Handle")
 
           val ownerClass = jar.tryLocateClassByPath(targetHandle.owner) ?: continue
-          handleMethodInvocationInstruction(ownerClass, targetHandle.desc, targetHandle.name, jar, methodStack, visitedMethods, list)
+          handleMethodInvocationInstruction(ownerClass, targetHandle.desc, targetHandle.name, methodStack, visitedMethods, list)
           continue
         }
 
-        // java/lang/invoke/StringConcatFactory#makeConcatWithConstants is ignored, for now at least
-        if (instruction.name == "makeConcatWithConstants")
+        // Ignored, for now at least
+        if (instruction.name == StringConcatFactory::makeConcatWithConstants.name)
           continue
 
         throw IllegalStateException("Did not account for dynamic invocation: ${instruction.name} ${instruction.desc}")
@@ -539,12 +656,12 @@ object EndpointParser {
     logger.fine("exit $owner :: ${methodNode.name}: ${methodNode.desc}")
   }
 
-  private fun processController(javaClass: JavaClassFile, jar: JarContainer, endpoints: MutableList<EndpointMethod>) {
+  private fun processController(javaClass: JavaClassFile, endpoints: MutableList<EndpointMethod>) {
     var basePath: String? = null
 
     if (javaClass.classNode.visibleAnnotations != null) {
       for (methodAnnotation in javaClass.classNode.visibleAnnotations) {
-        if (methodAnnotation.desc == requestMappingDescriptor) {
+        if (methodAnnotation.desc == Util.makeDescriptor(RequestMapping::class)) {
           val annotationValues = Util.parseAnnotationValues(methodAnnotation) ?: continue
           basePath = parseMappingAnnotationPath(annotationValues)
           break
@@ -557,11 +674,11 @@ object EndpointParser {
 
     for (method in javaClass.classNode.methods) {
       if (method.access and Opcodes.ACC_PUBLIC != 0)
-        endpoints.add(parseEndpoint(basePath, javaClass, method, jar) ?: continue)
+        endpoints.add(parseEndpoint(basePath, javaClass, method) ?: continue)
     }
   }
 
-  fun parseEndpoints(jar: JarContainer): List<EndpointMethod> {
+  fun parseEndpoints(): List<EndpointMethod> {
     val endpoints = mutableListOf<EndpointMethod>()
 
     for (controllerPackagePath in jar.controllerPackagePaths) {
@@ -569,7 +686,7 @@ object EndpointParser {
         if (!entry.key.startsWith(controllerPackagePath))
           continue
 
-        processController(entry.value, jar, endpoints)
+        processController(entry.value, endpoints)
       }
     }
 

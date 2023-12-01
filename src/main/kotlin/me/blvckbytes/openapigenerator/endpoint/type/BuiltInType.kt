@@ -7,7 +7,7 @@ import java.util.*
 
 class BuiltInType private constructor(
   val name: String,
-  vararg descriptors: String
+  private vararg val descriptors: String
 ) {
 
   companion object {
@@ -40,5 +40,9 @@ class BuiltInType private constructor(
 
   override fun toString(): String {
     return name
+  }
+
+  fun descriptor(): String {
+    return descriptors[0]
   }
 }

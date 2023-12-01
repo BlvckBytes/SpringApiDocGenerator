@@ -10,6 +10,7 @@ version = "0.1"
 
 repositories {
     mavenCentral()
+    mavenLocal()
 }
 
 dependencies {
@@ -20,6 +21,7 @@ dependencies {
     implementation("org.springframework:spring-web:6.1.1")
     implementation("com.fasterxml.jackson.core:jackson-annotations:2.16.0")
     implementation("org.codehaus.jettison:jettison:1.5.4")
+    implementation("me.blvckbytes:PropertyValidation:0.1")
 }
 
 tasks.test {

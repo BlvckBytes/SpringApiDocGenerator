@@ -20,7 +20,7 @@ fun main() {
     { extractClassNameFromPath(it).endsWith("Controller") },
     { extractClassNameFromPath(it).contains("Dto") }
   )
-  val endpoints = EndpointParser.parseEndpoints(jar)
+  val endpoints = EndpointParser(jar).parseEndpoints()
   val end = System.nanoTime()
 
   val generatedDocument = OpenApiGenerator.generate(jar, endpoints)

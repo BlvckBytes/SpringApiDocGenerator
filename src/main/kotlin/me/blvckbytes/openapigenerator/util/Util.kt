@@ -5,12 +5,15 @@ import kotlin.reflect.KClass
 
 object Util {
 
+  private val descriptorByClass = mutableMapOf<KClass<*>, String>()
+  private val internalNameByClass = mutableMapOf<KClass<*>, String>()
+
   fun makeDescriptor(type: KClass<*>): String {
-    return 'L' + makeName(type) + ';'
+    return internalNameByClass.computeIfAbsent(type) { 'L' + makeName(type) + ';' }
   }
 
   fun makeName(type: KClass<*>): String {
-    return type.qualifiedName!!.replace('.', '/')
+    return descriptorByClass.computeIfAbsent(type) { type.qualifiedName!!.replace('.', '/') }
   }
 
   fun <T> extractAnnotationValue(
