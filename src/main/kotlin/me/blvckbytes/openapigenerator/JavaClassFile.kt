@@ -2,6 +2,7 @@ package me.blvckbytes.openapigenerator
 
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.FieldNode
 import org.objectweb.asm.tree.MethodNode
 import java.io.File
 
@@ -28,6 +29,14 @@ class JavaClassFile(
     val name = classNode.name
     val lastDotIndex = name.lastIndexOf('/')
     return name.substring(lastDotIndex + 1)
+  }
+
+  fun tryFindField(name: String, descriptor: String): FieldNode? {
+    for (field in classNode.fields) {
+      if (field.name == name && field.desc == descriptor)
+        return field
+    }
+    return null
   }
 
   fun tryFindMethod(jar: JarContainer, name: String, descriptor: String?): MethodNode? {

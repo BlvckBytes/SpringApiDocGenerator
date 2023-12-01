@@ -2,6 +2,7 @@ package me.blvckbytes.openapigenerator.endpoint
 
 import me.blvckbytes.openapigenerator.JarContainer
 import me.blvckbytes.openapigenerator.JavaClassFile
+import me.blvckbytes.openapigenerator.QuickConsoleLogger
 import me.blvckbytes.openapigenerator.util.Util
 import me.blvckbytes.openapigenerator.endpoint.type.BuiltInType
 import me.blvckbytes.openapigenerator.endpoint.type.input.BuiltInEndpointInputType
@@ -9,10 +10,8 @@ import me.blvckbytes.openapigenerator.endpoint.type.input.EndpointInputType
 import me.blvckbytes.openapigenerator.endpoint.type.input.InputSource
 import me.blvckbytes.openapigenerator.endpoint.type.input.JavaClassEndpointInputType
 import me.blvckbytes.openapigenerator.endpoint.type.output.JavaClassEndpointOutputType
-import me.blvckbytes.propertyvalidation.validatior.ApplicableValidator
-import me.blvckbytes.propertyvalidation.validatior.NotNull
-import me.blvckbytes.propertyvalidation.validatior.NotNullAndNotBlank
-import me.blvckbytes.propertyvalidation.validatior.NullOrNotBlank
+import me.blvckbytes.openapigenerator.instructions.*
+import me.blvckbytes.propertyvalidation.validatior.*
 import org.objectweb.asm.Handle
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
@@ -21,9 +20,12 @@ import org.objectweb.asm.tree.AnnotationNode
 import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.InsnNode
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
+import org.objectweb.asm.tree.LabelNode
 import org.objectweb.asm.tree.LdcInsnNode
+import org.objectweb.asm.tree.LineNumberNode
 import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.MethodNode
+import org.objectweb.asm.tree.TypeInsnNode
 import org.objectweb.asm.tree.VarInsnNode
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
@@ -38,8 +40,6 @@ import kotlin.jvm.internal.PropertyReference
 class EndpointParser(
   private val jar: JarContainer
 ) {
-  private val opcodeNameByOpcode = arrayOfNulls<String>(0xFF)
-
   private val logger = Logger.getLogger(EndpointParser::class.qualifiedName)
 
   init {
@@ -57,31 +57,6 @@ class EndpointParser(
 
       override fun close() {}
     })
-
-    val ignorePrefixes = listOf(
-      "ASM", "H_", "T_", "F_", "V_", "ACC_",
-      "V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9",
-    )
-
-    val ignoreEquals = listOf(
-      "TOP", "INTEGER", "FLOAT", "DOUBLE", "LONG", "NULL", "UNINITIALIZED_THIS",
-      "SOURCE_MASK", "SOURCE_DEPRECATED"
-    )
-
-    for (field in Opcodes::class.java.declaredFields) {
-      if (field.type.simpleName != "int")
-        continue
-
-      val name = field.name
-
-      if (ignorePrefixes.any{ name.startsWith(it) })
-        continue
-
-      if (ignoreEquals.any{ name == it })
-        continue
-
-      opcodeNameByOpcode[field.get(null) as Int] = field.name
-    }
   }
 
   private val requestMethodBySpecificDescriptor = mapOf(
@@ -497,42 +472,97 @@ class EndpointParser(
     ownerClass: JavaClassFile,
     currentInstructionIndex: Int
   ) {
-    // TODO: CompareToConstant, CompareToMinMax, CompareToOther
-    // constructor(field: KProperty, fieldValue: Any?)
-    if (
-      ownerClass.classNode.name == Util.makeName(NotNull::class) ||
-      ownerClass.classNode.name == Util.makeName(NotNullAndNotBlank::class) ||
-      ownerClass.classNode.name == Util.makeName(NullOrNotBlank::class)
-    ) {
-      for (instructionIndex in currentInstructionIndex - 1 downTo 0) {
-        val instruction = methodNode.instructions.get(instructionIndex)
-        val opcode = instruction.opcode
+    val parser = InstructionsParser(
+      methodNode.instructions,
+      currentInstructionIndex - 1 downTo 0,
+      jar,
+//      logger = QuickConsoleLogger(Level.FINEST)
+    )
+      .ignoreInstructions(TypeInsnNode::class, LabelNode::class, LineNumberNode::class)
 
-        if (!isValidOpcode(opcode))
-          continue
+    when (ownerClass.classNode.name) {
+      // constructor(field: KProperty, fieldValue: Any?)
+      Util.makeName(NotNull::class),
+      Util.makeName(NotNullAndNotBlank::class),
+      Util.makeName(NullOrNotBlank::class) -> {
+        val targetInstructions = parser.matchSequence(
+          VarInsnMatcher(),
+          FieldInsnMatcher(name = "INSTANCE", isStatic = true),
+        ) ?: throw IllegalStateException("Could not parse validator construction invocation parameter instructions ${parser.stringifyInstructions()}")
 
-        if (opcode == Opcodes.CHECKCAST)
-          continue
+        val fieldContainer = jar.locateClassByPath((targetInstructions[1] as FieldInsnNode).owner)
+        val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
 
-        if (instruction is FieldInsnNode) {
-          if (instruction.name != "INSTANCE")
-            continue
-
-          val fieldContainer = jar.locateClassByPath(instruction.owner)
-
-          val targetField = fieldContainer.classNode.fields.firstOrNull {
-            it.name == instruction.name && it.desc == instruction.desc
-          } ?: throw IllegalStateException("Could not locate field ${instruction.name} of $fieldContainer")
-
-          if (targetField.access and Opcodes.ACC_STATIC == 0)
-            throw IllegalStateException("Expected $fieldContainer#INSTANCE to be a static field")
-
-          val (containingClass, propertyName) = parseKotlinPropertyReference(fieldContainer)
-          println("${ownerClass.simpleName}: ${containingClass.simpleName}#$propertyName")
-        }
+        // TODO: These need to be linked to the input parameter of the endpoint as validation entries
+        println("${ownerClass.simpleName}: $fieldClass#$fieldName")
       }
 
-      return
+      // constructor(field: KProperty, fieldValue: T?, constant: T, comparison: Comparison)
+      Util.makeName(CompareToConstant::class) -> {
+        val targetInstructions = parser.matchSequence(
+          FieldInsnMatcher(owner = Util.makeName(Comparison::class)),
+          MethodInsnMatcher(name = "valueOf", optional = true),
+          OrMatcher(
+            InsnMatcher(Opcodes.DCONST_0),
+            InsnMatcher(Opcodes.ICONST_0),
+            LdcInsnMatcher(),
+          ),
+          VarInsnMatcher(),
+          FieldInsnMatcher(name = "INSTANCE", isStatic = true),
+        ) ?: throw IllegalStateException("Could not parse validator construction invocation parameter instructions ${parser.stringifyInstructions()}")
+
+        val comparison = Comparison.valueOf((targetInstructions[0] as FieldInsnNode).name)
+        val constant = when (val instruction = targetInstructions[2]) {
+          is LdcInsnNode -> instruction.cst
+          is InsnNode -> when (instruction.opcode) {
+            Opcodes.DCONST_0 -> 0.0
+            Opcodes.ICONST_0 -> 0
+            else -> throw IllegalStateException("Unaccounted-for opcode ${instruction.opcode}")
+          }
+          else -> throw IllegalStateException("Unaccounted-for instruction: ${instruction.javaClass.simpleName}")
+        }
+
+        val fieldContainer = jar.locateClassByPath((targetInstructions[4] as FieldInsnNode).owner)
+        val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
+        println("${ownerClass.simpleName}: $fieldClass#$fieldName $comparison $constant")
+      }
+
+      // constructor(field: KProperty, fieldValue: T?, other: KProperty, otherValue: T?, comparison: Comparison)
+      Util.makeName(CompareToOther::class) -> {
+        val targetInstructions = parser.matchSequence(
+          FieldInsnMatcher(owner = Util.makeName(Comparison::class)),
+          VarInsnMatcher(),
+          FieldInsnMatcher(name = "INSTANCE", isStatic = true),
+          VarInsnMatcher(),
+          FieldInsnMatcher(name = "INSTANCE", isStatic = true),
+        ) ?: throw IllegalStateException("Could not parse validator construction invocation parameter instructions ${parser.stringifyInstructions()}")
+
+        val comparison = Comparison.valueOf((targetInstructions[0] as FieldInsnNode).name)
+
+        val otherContainer = jar.locateClassByPath((targetInstructions[2] as FieldInsnNode).owner)
+        val (otherClass, otherName) = parseKotlinPropertyReference(otherContainer)
+
+        val fieldContainer = jar.locateClassByPath((targetInstructions[4] as FieldInsnNode).owner)
+        val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
+        println("${ownerClass.simpleName}: $fieldClass#$fieldName $comparison $otherClass#$otherName")
+      }
+
+      // constructor(field: KProperty, fieldValue: T?, min: T, max: T)
+      Util.makeName(CompareToMinMax::class) -> {
+        val targetInstructions = parser.matchSequence(
+          LdcInsnMatcher(),
+          LdcInsnMatcher(),
+          VarInsnMatcher(),
+          FieldInsnMatcher(name = "INSTANCE", isStatic = true),
+        ) ?: throw IllegalStateException("Could not parse validator construction invocation parameter instructions ${parser.stringifyInstructions()}")
+
+        val min = (targetInstructions[0] as LdcInsnNode).cst
+        val max = (targetInstructions[1] as LdcInsnNode).cst
+
+        val fieldContainer = jar.locateClassByPath((targetInstructions[3] as FieldInsnNode).owner)
+        val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
+        println("${ownerClass.simpleName}: $fieldClass#$fieldName between $min and $max")
+      }
     }
   }
 
@@ -555,7 +585,7 @@ class EndpointParser(
         continue
       }
 
-      val opcodeName = opcodeNameByOpcode[instruction.opcode]
+      val opcodeName = InstructionsParser.resolveOpcode(instruction.opcode)
       logger.finest("op $opcodeName")
 
       // Zero operands instruction
@@ -574,7 +604,7 @@ class EndpointParser(
             ++indexOffset
           } while (!isValidOpcode(previousInstruction.opcode))
 
-          val previousInstructionOpcodeName = opcodeNameByOpcode[instruction.opcode]
+          val previousInstructionOpcodeName = InstructionsParser.resolveOpcode(instruction.opcode)
 
           if (previousInstruction is MethodInsnNode) {
             if (previousInstruction.opcode == Opcodes.INVOKESPECIAL) {
