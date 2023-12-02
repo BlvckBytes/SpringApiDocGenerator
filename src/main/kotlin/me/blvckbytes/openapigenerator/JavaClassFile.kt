@@ -1,6 +1,7 @@
 package me.blvckbytes.openapigenerator
 
 import org.objectweb.asm.ClassReader
+import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.FieldNode
 import org.objectweb.asm.tree.MethodNode
@@ -8,7 +9,7 @@ import java.io.File
 
 class JavaClassFile(
   private val name: String,
-  private val bytes: ByteArray,
+  val bytes: ByteArray,
 ) {
   private var _classNode: ClassNode? = null
 
@@ -31,12 +32,39 @@ class JavaClassFile(
     return name.substring(lastDotIndex + 1)
   }
 
-  fun tryFindField(name: String, descriptor: String): FieldNode? {
+  fun findField(name: String, descriptor: String?): FieldNode {
+    return tryFindField(name, descriptor)
+      ?: throw IllegalStateException("Could not find field $name of class ${classNode.name}")
+  }
+
+  fun tryFindField(name: String, descriptor: String?): FieldNode? {
     for (field in classNode.fields) {
-      if (field.name == name && field.desc == descriptor)
+      if (field.name == name && (descriptor == null || field.desc == descriptor))
         return field
     }
     return null
+  }
+
+  fun isAbstractOrInterface(): Boolean {
+    return classNode.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT) != 0
+  }
+
+  fun stripCompanion(jar: JarContainer): JavaClassFile {
+    var realContainingClassName = classNode.name
+    val companionSuffix = "\$Companion"
+
+    var companionSuffixIndex: Int
+
+    while (true) {
+      companionSuffixIndex = realContainingClassName.indexOf(companionSuffix)
+
+      if (companionSuffixIndex < 0)
+        break
+
+      realContainingClassName = realContainingClassName.substring(0, companionSuffixIndex)
+    }
+
+    return jar.locateClassByPath(realContainingClassName)
   }
 
   fun tryFindMethod(jar: JarContainer, name: String, descriptor: String?): MethodNode? {

@@ -105,6 +105,8 @@ class InstructionsParser(
       }
 
       if (matcher.optional) {
+        // Still add the matcher, so that the resulting indices will be statically ordered
+        matches.add(matcher)
         logger?.finest("previous matcher was optional, continuing without index increment")
         continue
       }

@@ -34,6 +34,9 @@ import java.util.Stack
 import java.util.logging.*
 import kotlin.collections.ArrayList
 import kotlin.jvm.internal.PropertyReference
+import kotlin.jvm.internal.PropertyReference0Impl
+import kotlin.reflect.KClass
+import kotlin.reflect.KProperty
 
 class EndpointParser(
   private val jar: JarContainer
@@ -280,17 +283,37 @@ class EndpointParser(
       )
     }
 
-    val exceptionsThrown = recursivelyCollectThrownExceptions(owner, methodNode)
+    val (exceptionsThrown, validators) = recursivelyCollectThrownExceptionsAndValidators(owner, methodNode)
 
-    // TODO: Continue working on this
-    if (exceptionsThrown.size > 0) {
-      println("\nMethod ${methodNode.name} throws:")
-      exceptionsThrown.forEach {
-        print("${it.classFile.simpleName}: ")
-        println(it.methodStack.joinToString { classMethod ->
-          "${classMethod.containingClass.simpleName}#${classMethod.method.name}()"
-        })
+    println("\nMethod ${methodNode.name}:")
+
+    println("Exceptions:")
+    exceptionsThrown.forEach {
+      print("${it.classFile.simpleName}: ")
+      println(it.methodStack.joinToString { classMethod ->
+        "${classMethod.containingClass.simpleName}#${classMethod.method.name}()"
+      })
+    }
+
+    println("Validators:")
+    validators.forEach {
+      val name = it.javaClass.simpleName
+      print("$name: ")
+
+      fun propString(property: KProperty<*>): String {
+        val ownerName = ((property as PropertyReference).owner as KClass<*>).simpleName!!
+        return "$ownerName#${property.name}"
       }
+
+      println(when (it) {
+        is NotNull -> propString(it.field)
+        is NullOrNotBlank -> propString(it.field)
+        is NotNullAndNotBlank -> propString(it.field)
+        is CompareToConstant -> "${propString(it.field)} ${it.comparison} ${it.constant}"
+        is CompareToOther -> "${propString(it.field)} ${it.comparison} ${propString(it.other)}"
+        is CompareToMinMax -> "${propString(it.field)} between ${it.min} and ${it.max}"
+        else -> throw IllegalStateException("Unimplemented validator $name")
+      })
     }
 
     return EndpointMethod(
@@ -303,15 +326,17 @@ class EndpointParser(
     )
   }
 
-  private fun recursivelyCollectThrownExceptions(
+  private fun recursivelyCollectThrownExceptionsAndValidators(
     owner: JavaClassFile,
     methodNode: MethodNode
-  ): HashSet<ThrownException> {
-    val result = HashSet<ThrownException>()
+  ): Pair<HashSet<ThrownException>, List<Validator<*>>> {
+    val exceptions = HashSet<ThrownException>()
+    val validators = mutableListOf<Validator<*>>()
     val visitedMethods = HashSet<String>()
     val methodStack = Stack<ClassMethod>()
-    collectThrownExceptions(owner, methodNode, methodStack, visitedMethods, result)
-    return result
+
+    collectThrownExceptions(owner, methodNode, methodStack, visitedMethods, exceptions, validators)
+    return Pair(exceptions, validators)
   }
 
   private fun handleMethodInvocationInstruction(
@@ -320,7 +345,8 @@ class EndpointParser(
     name: String,
     methodStack: Stack<ClassMethod>,
     visitedMethods: MutableSet<String>,
-    list: HashSet<ThrownException>
+    exceptions: HashSet<ThrownException>,
+    validators: MutableList<Validator<*>>
   ) {
     if (!jar.methodInvocationOwnerPaths.contains(ownerClass.classNode.name)) {
       logger.finest("ignore $ownerClass")
@@ -338,11 +364,11 @@ class EndpointParser(
     // so it's throw statements have to be collected as well.
     if (jar.doesExtend(ownerClass, kotlinLambdaName)) {
       ownerClass.tryFindMethod(jar, "invoke", null)?.let {
-        handleMethodInvocationInstruction(ownerClass, it.desc, it.name, methodStack, visitedMethods, list)
+        handleMethodInvocationInstruction(ownerClass, it.desc, it.name, methodStack, visitedMethods, exceptions, validators)
       }
     }
 
-    if (ownerClass.classNode.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT) > 0) {
+    if (ownerClass.isAbstractOrInterface()) {
       // For now, at least, just skip functional interfaces
       if (ownerClass.classNode.visibleAnnotations?.any {
         it.desc == Util.makeDescriptor(FunctionalInterface::class)
@@ -355,14 +381,14 @@ class EndpointParser(
         throw IllegalStateException("Found unimplemented but called interface/abstract class: $ownerClass")
 
       for (ownerClassImplementation in ownerClassImplementations)
-        handleMethodInvocationInstruction(ownerClassImplementation, desc, name, methodStack, visitedMethods, list)
+        handleMethodInvocationInstruction(ownerClassImplementation, desc, name, methodStack, visitedMethods, exceptions, validators)
 
       return
     }
 
     val targetMethod = ownerClass.tryFindMethod(jar, name, desc) ?: return
 
-    collectThrownExceptions(ownerClass, targetMethod, methodStack, visitedMethods, list)
+    collectThrownExceptions(ownerClass, targetMethod, methodStack, visitedMethods, exceptions, validators)
   }
 
   private fun isValidOpcode(opcode: Int): Boolean {
@@ -396,7 +422,10 @@ class EndpointParser(
     ))
   }
 
-  private fun parseKotlinPropertyReference(javaClass: JavaClassFile): FieldReference {
+  private fun parseKotlinPropertyReference(
+    containingClass: JavaClassFile,
+    javaClass: JavaClassFile
+  ): PropertyReference {
     val propertyReferenceName = Util.makeName(PropertyReference::class)
 
     if (!jar.doesExtend(javaClass, propertyReferenceName))
@@ -456,20 +485,27 @@ class EndpointParser(
       if (containingClassInstruction.cst !is Type)
         throw IllegalStateException("Expected containing-class to be a constant Type")
 
-      return FieldReference(
-        jar.locateClassByPath((containingClassInstruction.cst as Type).internalName),
-        propertyNameInstruction.cst as String
-      )
+      val owner = jar.locateClassByPath((containingClassInstruction.cst as Type).internalName)
+      val fieldName = propertyNameInstruction.cst as String
+      val realContainingClass = containingClass.stripCompanion(jar)
+
+      if (owner != realContainingClass)
+        throw IllegalStateException("${realContainingClass.classNode.name} referenced field $fieldName of foreign class ${owner.classNode.name}")
+
+      val field = owner.findField(fieldName, null)
+
+      return PropertyReference0Impl(jar.load(owner), fieldName, field.desc, 0)
     }
 
     throw IllegalStateException("Could not parse a kotlin property reference: $javaClass")
   }
 
   private fun parseValidatorConstructorInstruction(
+    containingClass: JavaClassFile,
     methodNode: MethodNode,
     ownerClass: JavaClassFile,
     currentInstructionIndex: Int
-  ) {
+  ) : Validator<*> {
     val parser = InstructionsParser(
       methodNode.instructions,
       currentInstructionIndex - 1 downTo 0,
@@ -478,7 +514,7 @@ class EndpointParser(
     )
       .ignoreInstructions(TypeInsnNode::class, LabelNode::class, LineNumberNode::class)
 
-    when (ownerClass.classNode.name) {
+    return when (val validatorName = ownerClass.classNode.name) {
       // constructor(field: KProperty, fieldValue: Any?)
       Util.makeName(NotNull::class),
       Util.makeName(NotNullAndNotBlank::class),
@@ -489,10 +525,15 @@ class EndpointParser(
         ) ?: throw IllegalStateException("Could not parse validator construction invocation parameter instructions ${parser.stringifyInstructions()}")
 
         val fieldContainer = jar.locateClassByPath((targetInstructions[1] as FieldInsnMatcher).instruction!!.owner)
-        val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
+        val fieldReference = parseKotlinPropertyReference(containingClass, fieldContainer)
 
-        // TODO: These need to be linked to the input parameter of the endpoint as validation entries
-        println("${ownerClass.simpleName}: $fieldClass#$fieldName")
+        @Suppress("UNCHECKED_CAST")
+        when(validatorName) {
+          Util.makeName(NotNull::class) -> NotNull(fieldReference, null)
+          Util.makeName(NotNullAndNotBlank::class) -> NotNullAndNotBlank(fieldReference as KProperty<String?>, null)
+          Util.makeName(NullOrNotBlank::class) -> NullOrNotBlank(fieldReference as KProperty<String?>, null)
+          else -> throw IllegalStateException() // Seriously, kotlin?
+        }
       }
 
       // constructor(field: KProperty, fieldValue: T?, constant: T, comparison: Comparison)
@@ -509,8 +550,15 @@ class EndpointParser(
         val constant = (targetInstructions[2] as ConstantValueMatcher).value
 
         val fieldContainer = jar.locateClassByPath((targetInstructions[4] as FieldInsnMatcher).instruction!!.owner)
-        val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
-        println("${ownerClass.simpleName}: $fieldClass#$fieldName $comparison $constant")
+        val fieldReference = parseKotlinPropertyReference(containingClass, fieldContainer)
+
+        @Suppress("UNCHECKED_CAST")
+        CompareToConstant(
+          fieldReference as KProperty<Comparable<Any>?>,
+          null,
+          constant as Comparable<Any>,
+          comparison
+        )
       }
 
       // constructor(field: KProperty, fieldValue: T?, other: KProperty, otherValue: T?, comparison: Comparison)
@@ -526,11 +574,19 @@ class EndpointParser(
         val comparison = Comparison.valueOf((targetInstructions[0] as FieldInsnMatcher).instruction!!.name)
 
         val otherContainer = jar.locateClassByPath((targetInstructions[2] as FieldInsnMatcher).instruction!!.owner)
-        val (otherClass, otherName) = parseKotlinPropertyReference(otherContainer)
+        val otherReference = parseKotlinPropertyReference(containingClass, otherContainer)
 
         val fieldContainer = jar.locateClassByPath((targetInstructions[4] as FieldInsnMatcher).instruction!!.owner)
-        val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
-        println("${ownerClass.simpleName}: $fieldClass#$fieldName $comparison $otherClass#$otherName")
+        val fieldReference = parseKotlinPropertyReference(containingClass, fieldContainer)
+
+        @Suppress("UNCHECKED_CAST")
+        CompareToOther(
+          fieldReference as KProperty<Comparable<Any>?>,
+          null,
+          otherReference as KProperty<Comparable<Any>?>,
+          null,
+          comparison
+        )
       }
 
       // constructor(field: KProperty, fieldValue: T?, min: T, max: T)
@@ -546,9 +602,18 @@ class EndpointParser(
         val max = (targetInstructions[1] as ConstantValueMatcher).value
 
         val fieldContainer = jar.locateClassByPath((targetInstructions[3] as FieldInsnMatcher).instruction!!.owner)
-        val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
-        println("${ownerClass.simpleName}: $fieldClass#$fieldName between $min and $max")
+        val fieldReference = parseKotlinPropertyReference(containingClass, fieldContainer)
+
+        @Suppress("UNCHECKED_CAST")
+        CompareToMinMax(
+          fieldReference as KProperty<Comparable<Any>?>,
+          null,
+          null,
+          null,
+        )
       }
+
+      else -> throw IllegalStateException("Unimplemented validator: $validatorName")
     }
   }
 
@@ -557,7 +622,8 @@ class EndpointParser(
     methodNode: MethodNode,
     methodStack: Stack<ClassMethod>,
     visitedMethods: MutableSet<String>,
-    list: HashSet<ThrownException>
+    exceptions: HashSet<ThrownException>,
+    validators: MutableList<Validator<*>>,
   ) {
     methodStack.push(ClassMethod(owner, methodNode))
     logger.fine("enter $owner :: ${methodNode.name}: ${methodNode.desc}")
@@ -599,19 +665,19 @@ class EndpointParser(
             }
 
             else if (previousInstruction.opcode == Opcodes.INVOKEVIRTUAL)
-              addExceptionByNameIfInPaths(Type.getMethodType(previousInstruction.desc).returnType.internalName, methodStack, list)
+              addExceptionByNameIfInPaths(Type.getMethodType(previousInstruction.desc).returnType.internalName, methodStack, exceptions)
 
             else
               throw IllegalStateException("Unaccounted-for invocation opcode: $previousInstructionOpcodeName")
 
-            addExceptionByNameIfInPaths(previousInstruction.owner, methodStack, list)
+            addExceptionByNameIfInPaths(previousInstruction.owner, methodStack, exceptions)
             continue
           }
 
           if (previousInstruction is VarInsnNode) {
             val loadedVariable = methodNode.localVariables[previousInstruction.`var`]
 
-            addExceptionByNameIfInPaths(Type.getType(loadedVariable.desc).internalName, methodStack, list)
+            addExceptionByNameIfInPaths(Type.getType(loadedVariable.desc).internalName, methodStack, exceptions)
             continue
           }
 
@@ -625,9 +691,9 @@ class EndpointParser(
         val ownerClass = jar.tryLocateClassByPath(instruction.owner) ?: continue
 
         if (instruction.name == "<init>" && jar.doesExtend(ownerClass, Util.makeName(ApplicableValidator::class)))
-          parseValidatorConstructorInstruction(methodNode, ownerClass, instructionIndex)
+          validators.add(parseValidatorConstructorInstruction(owner, methodNode, ownerClass, instructionIndex))
 
-        handleMethodInvocationInstruction(ownerClass, instruction.desc, instruction.name, methodStack, visitedMethods, list)
+        handleMethodInvocationInstruction(ownerClass, instruction.desc, instruction.name, methodStack, visitedMethods, exceptions, validators)
         continue
       }
 
@@ -657,7 +723,7 @@ class EndpointParser(
             throw IllegalStateException("Found no BSM argument of type Handle")
 
           val ownerClass = jar.tryLocateClassByPath(targetHandle.owner) ?: continue
-          handleMethodInvocationInstruction(ownerClass, targetHandle.desc, targetHandle.name, methodStack, visitedMethods, list)
+          handleMethodInvocationInstruction(ownerClass, targetHandle.desc, targetHandle.name, methodStack, visitedMethods, exceptions, validators)
           continue
         }
 

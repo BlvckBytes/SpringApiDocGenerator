@@ -7,6 +7,8 @@ class JarContainer(
   returnTypePredicate: (classFilePath: String) -> Boolean,
 ) {
 
+  private val loader = JarContainerClassLoader(this, javaClass.classLoader)
+
   private val returnTypeClassFiles: List<JavaClassFile>
   private val methodInvocationOwnerClassFiles: List<JavaClassFile>
 
@@ -38,6 +40,10 @@ class JarContainer(
 
   val classes: Collection<Map.Entry<String, JavaClassFile>>
   get() = classFileByPath.entries
+
+  fun load(file: JavaClassFile): Class<*> {
+    return loader.loadClass(file.classNode.name.replace('/', '.'))
+  }
 
   fun locateClassByPath(path: String): JavaClassFile {
     return classFileByPath[path]

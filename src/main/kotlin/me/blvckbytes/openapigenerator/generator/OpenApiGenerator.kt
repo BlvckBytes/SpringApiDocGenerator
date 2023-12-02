@@ -549,7 +549,7 @@ object OpenApiGenerator {
     if (javaClass.classNode.access and Opcodes.ACC_ENUM != 0)
       appendTypeAndEnumConstantsForEnum(javaClass, schemaNode)
 
-    else if (javaClass.classNode.access and (Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT) != 0) {
+    else if (javaClass.isAbstractOrInterface()) {
       val extendingClasses = generatorState.jar.findTypesThatExtendReturnType(javaClass)
 
       if (extendingClasses.isEmpty())
