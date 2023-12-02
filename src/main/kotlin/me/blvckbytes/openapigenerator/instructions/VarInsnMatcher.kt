@@ -7,15 +7,18 @@ import java.util.logging.Logger
 
 class VarInsnMatcher(
   override val optional: Boolean = false
-) : InstructionMatcher {
+) : InstructionMatcher<VarInsnNode> {
 
-  override fun match(instruction: AbstractInsnNode, jar: JarContainer, logger: Logger?): Boolean {
+  override var instruction: VarInsnNode? = null
+
+  override fun match(instruction: AbstractInsnNode, jar: JarContainer, logger: Logger?): InstructionMatcher<VarInsnNode>? {
     if (instruction !is VarInsnNode) {
       logger?.fine("${instruction.javaClass.simpleName} is not a VarInsnNode")
-      return false
+      return null
     }
 
     logger?.finest("matched VarInsnNode")
-    return true
+    this.instruction = instruction
+    return this
   }
 }

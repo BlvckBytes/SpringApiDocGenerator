@@ -14,7 +14,6 @@ import org.objectweb.asm.tree.TypeInsnNode
 import org.objectweb.asm.tree.VarInsnNode
 import java.util.StringJoiner
 import java.util.logging.Logger
-import kotlin.math.abs
 import kotlin.reflect.KClass
 
 class InstructionsParser(
@@ -69,67 +68,54 @@ class InstructionsParser(
     return this
   }
 
-  fun matchSequence(vararg matchers: InstructionMatcher): List<AbstractInsnNode>? {
+  fun matchSequence(vararg matchers: InstructionMatcher<*>): List<InstructionMatcher<*>>? {
+    val matches = mutableListOf<InstructionMatcher<*>>()
+    var instructionIndex = targetIndices.first
 
-    val realIndexByFilteredIndex = mutableMapOf<Int, Int>()
+    for (matcher in matchers) {
+      var instruction: AbstractInsnNode
 
-    val filteredInstructions = buildList<AbstractInsnNode> {
-      for (instructionIndex in targetIndices) {
-        val instruction = instructions.get(instructionIndex)
-
-        if (ignoredInstructions.none { it.isInstance(instruction) }) {
-          realIndexByFilteredIndex[size] = instructionIndex
-          add(instruction)
-        }
-      }
-    }
-
-    val numberOfFilteredInstructions = filteredInstructions.size
-    val currentInstructions = mutableListOf<AbstractInsnNode>()
-
-
-    offsetLoop@ for (instructionIndex in filteredInstructions.indices) {
-      currentInstructions.clear()
-
-      var numberOfSkippedOptionals = 0
-
-      matcherLoop@ for (matcherIndex in matchers.indices) {
-        val matcher = matchers[matcherIndex]
-
-        val currentInstructionIndex = instructionIndex + matcherIndex - numberOfSkippedOptionals
-
-        if (currentInstructionIndex < 0 || currentInstructionIndex >= numberOfFilteredInstructions)
-          return null
-
-        logger?.finest("index=${realIndexByFilteredIndex[currentInstructionIndex]}")
-
-        val currentInstruction = filteredInstructions[currentInstructionIndex]
-
-        if (!matcher.match(currentInstruction, jar, logger)) {
-          if (matcher.optional) {
-            logger?.finest("previous matcher was optional, continuing")
-            ++numberOfSkippedOptionals
-            continue@matcherLoop
-          }
-
-          else {
-            if (logger != null)
-              println()
-
-            continue@offsetLoop
-          }
+      while (true) {
+        if (targetIndices.step > 0) {
+          if (instructionIndex < targetIndices.first || instructionIndex > targetIndices.last)
+            return null
+        } else {
+          if (instructionIndex > targetIndices.first || instructionIndex < targetIndices.last)
+            return null
         }
 
-        currentInstructions.add(currentInstruction)
+        logger?.finest("index=$instructionIndex")
+
+        instruction = instructions.get(instructionIndex)
+        val isIgnored = ignoredInstructions.any { it.isInstance(instruction) }
+
+        if (!isIgnored)
+          break
+
+        logger?.finest("ignore")
+        instructionIndex += targetIndices.step
       }
 
-      if (currentInstructions.size != matchers.size)
-        throw IllegalStateException("Expected result to be of same size as number of matchers are")
+      val match = matcher.match(instruction, jar, logger)
 
-      return currentInstructions
+      if (match != null) {
+        matches.add(match)
+        instructionIndex += targetIndices.step
+        continue
+      }
+
+      if (matcher.optional) {
+        logger?.finest("previous matcher was optional, continuing without index increment")
+        continue
+      }
+
+      throw IllegalStateException("A matcher could not find a match")
     }
 
-    return null
+    if (matches.size != matchers.size)
+      throw IllegalStateException("Expected result to be of same size as number of matchers are")
+
+    return matches
   }
 
   fun stringifyInstructions(): String {

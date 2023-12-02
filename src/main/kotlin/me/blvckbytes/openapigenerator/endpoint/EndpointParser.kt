@@ -2,7 +2,6 @@ package me.blvckbytes.openapigenerator.endpoint
 
 import me.blvckbytes.openapigenerator.JarContainer
 import me.blvckbytes.openapigenerator.JavaClassFile
-import me.blvckbytes.openapigenerator.QuickConsoleLogger
 import me.blvckbytes.openapigenerator.util.Util
 import me.blvckbytes.openapigenerator.endpoint.type.BuiltInType
 import me.blvckbytes.openapigenerator.endpoint.type.input.BuiltInEndpointInputType
@@ -17,7 +16,6 @@ import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.AbstractInsnNode
 import org.objectweb.asm.tree.AnnotationNode
-import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.InsnNode
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import org.objectweb.asm.tree.LabelNode
@@ -490,7 +488,7 @@ class EndpointParser(
           FieldInsnMatcher(name = "INSTANCE", isStatic = true),
         ) ?: throw IllegalStateException("Could not parse validator construction invocation parameter instructions ${parser.stringifyInstructions()}")
 
-        val fieldContainer = jar.locateClassByPath((targetInstructions[1] as FieldInsnNode).owner)
+        val fieldContainer = jar.locateClassByPath((targetInstructions[1] as FieldInsnMatcher).instruction!!.owner)
         val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
 
         // TODO: These need to be linked to the input parameter of the endpoint as validation entries
@@ -502,27 +500,15 @@ class EndpointParser(
         val targetInstructions = parser.matchSequence(
           FieldInsnMatcher(owner = Util.makeName(Comparison::class)),
           MethodInsnMatcher(name = "valueOf", optional = true),
-          OrMatcher(
-            InsnMatcher(Opcodes.DCONST_0),
-            InsnMatcher(Opcodes.ICONST_0),
-            LdcInsnMatcher(),
-          ),
+          ConstantValueMatcher(),
           VarInsnMatcher(),
           FieldInsnMatcher(name = "INSTANCE", isStatic = true),
         ) ?: throw IllegalStateException("Could not parse validator construction invocation parameter instructions ${parser.stringifyInstructions()}")
 
-        val comparison = Comparison.valueOf((targetInstructions[0] as FieldInsnNode).name)
-        val constant = when (val instruction = targetInstructions[2]) {
-          is LdcInsnNode -> instruction.cst
-          is InsnNode -> when (instruction.opcode) {
-            Opcodes.DCONST_0 -> 0.0
-            Opcodes.ICONST_0 -> 0
-            else -> throw IllegalStateException("Unaccounted-for opcode ${instruction.opcode}")
-          }
-          else -> throw IllegalStateException("Unaccounted-for instruction: ${instruction.javaClass.simpleName}")
-        }
+        val comparison = Comparison.valueOf((targetInstructions[0] as FieldInsnMatcher).instruction!!.name)
+        val constant = (targetInstructions[2] as ConstantValueMatcher).value
 
-        val fieldContainer = jar.locateClassByPath((targetInstructions[4] as FieldInsnNode).owner)
+        val fieldContainer = jar.locateClassByPath((targetInstructions[4] as FieldInsnMatcher).instruction!!.owner)
         val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
         println("${ownerClass.simpleName}: $fieldClass#$fieldName $comparison $constant")
       }
@@ -537,12 +523,12 @@ class EndpointParser(
           FieldInsnMatcher(name = "INSTANCE", isStatic = true),
         ) ?: throw IllegalStateException("Could not parse validator construction invocation parameter instructions ${parser.stringifyInstructions()}")
 
-        val comparison = Comparison.valueOf((targetInstructions[0] as FieldInsnNode).name)
+        val comparison = Comparison.valueOf((targetInstructions[0] as FieldInsnMatcher).instruction!!.name)
 
-        val otherContainer = jar.locateClassByPath((targetInstructions[2] as FieldInsnNode).owner)
+        val otherContainer = jar.locateClassByPath((targetInstructions[2] as FieldInsnMatcher).instruction!!.owner)
         val (otherClass, otherName) = parseKotlinPropertyReference(otherContainer)
 
-        val fieldContainer = jar.locateClassByPath((targetInstructions[4] as FieldInsnNode).owner)
+        val fieldContainer = jar.locateClassByPath((targetInstructions[4] as FieldInsnMatcher).instruction!!.owner)
         val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
         println("${ownerClass.simpleName}: $fieldClass#$fieldName $comparison $otherClass#$otherName")
       }
@@ -550,16 +536,16 @@ class EndpointParser(
       // constructor(field: KProperty, fieldValue: T?, min: T, max: T)
       Util.makeName(CompareToMinMax::class) -> {
         val targetInstructions = parser.matchSequence(
-          LdcInsnMatcher(),
-          LdcInsnMatcher(),
+          ConstantValueMatcher(),
+          ConstantValueMatcher(),
           VarInsnMatcher(),
           FieldInsnMatcher(name = "INSTANCE", isStatic = true),
         ) ?: throw IllegalStateException("Could not parse validator construction invocation parameter instructions ${parser.stringifyInstructions()}")
 
-        val min = (targetInstructions[0] as LdcInsnNode).cst
-        val max = (targetInstructions[1] as LdcInsnNode).cst
+        val min = (targetInstructions[0] as ConstantValueMatcher).value
+        val max = (targetInstructions[1] as ConstantValueMatcher).value
 
-        val fieldContainer = jar.locateClassByPath((targetInstructions[3] as FieldInsnNode).owner)
+        val fieldContainer = jar.locateClassByPath((targetInstructions[3] as FieldInsnMatcher).instruction!!.owner)
         val (fieldClass, fieldName) = parseKotlinPropertyReference(fieldContainer)
         println("${ownerClass.simpleName}: $fieldClass#$fieldName between $min and $max")
       }

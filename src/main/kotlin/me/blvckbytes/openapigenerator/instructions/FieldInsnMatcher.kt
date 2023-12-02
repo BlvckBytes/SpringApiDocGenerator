@@ -12,36 +12,39 @@ class FieldInsnMatcher(
   private val desc: String? = null,
   private val isStatic: Boolean? = null,
   override val optional: Boolean = false
-) : InstructionMatcher {
+) : InstructionMatcher<FieldInsnNode> {
 
-  override fun match(instruction: AbstractInsnNode, jar: JarContainer, logger: Logger?): Boolean {
+  override var instruction: FieldInsnNode? = null
+
+  override fun match(instruction: AbstractInsnNode, jar: JarContainer, logger: Logger?): InstructionMatcher<FieldInsnNode>? {
     if (instruction !is FieldInsnNode) {
       logger?.fine("${instruction.javaClass.simpleName} is not a FieldInsnNode")
-      return false
+      return null
     }
 
     if (owner != null && instruction.owner != owner) {
       logger?.fine("field owner ${instruction.owner} != $owner")
-      return false
+      return null
     }
 
     if (name != null && instruction.name != name) {
       logger?.fine("field name ${instruction.name} != $name")
-      return false
+      return null
     }
 
     if (desc != null && instruction.desc != desc) {
       logger?.fine("field desc ${instruction.desc} != $desc")
-      return false
+      return null
     }
 
     if (isStatic != null && isStaticField(jar, instruction) != isStatic) {
       logger?.fine("field static $isStatic mismatch")
-      return false
+      return null
     }
 
     logger?.finest("matched FieldInsnNode")
-    return true
+    this.instruction = instruction
+    return this
   }
 
   private fun isStaticField(jar: JarContainer, instruction: FieldInsnNode): Boolean {
