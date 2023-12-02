@@ -540,7 +540,7 @@ class EndpointParser(
       Util.makeName(CompareToConstant::class) -> {
         val targetInstructions = parser.matchSequence(
           FieldInsnMatcher(owner = Util.makeName(Comparison::class)),
-          MethodInsnMatcher(name = "valueOf", optional = true),
+          WrapperValueOfMethodMatcher(optional = false),
           ConstantValueMatcher(),
           VarInsnMatcher(),
           FieldInsnMatcher(name = "INSTANCE", isStatic = true),
